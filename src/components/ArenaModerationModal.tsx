@@ -51,6 +51,7 @@ export const ArenaModerationModal: React.FC<ArenaModerationModalProps> = ({
       : archivedArenas;
 
   const handleAction = async (arena: ArenaField, action: 'approve' | 'archive' | 'delete') => {
+    if (!isAuthorizedAdmin(user)) return;
     setProcessingId(arena.id);
     setStatusFeedback(null);
 

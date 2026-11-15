@@ -17,6 +17,7 @@ import {
   seedAndFetchArenasFromSupabase,
   fetchMatchesFromSupabase,
   fetchAdminPixWithdrawalsFromSupabase,
+  fetchOrCreateSupabaseProfile,
   isAuthorizedAdmin,
 } from './lib/supabaseClient';
 import { OnboardingCarousel } from './components/OnboardingCarousel';
@@ -47,8 +48,8 @@ import { OfflineIndicator } from './components/OfflineIndicator';
 import { PerformanceStats, ReportScope } from './utils/pdfReportGenerator';
 import {
   saveOfflineUserProfile,
+  clearOfflineUserProfile,
   saveOfflineMatches,
-  getOfflineUserProfile,
   getOfflineMatches,
   processPendingOfflineSync,
   clearLegacyTestCache,
@@ -163,143 +164,78 @@ export default function App() {
 
   // Sincronização automática de sessão com o Supabase e tratamento de redirecionamento de e-mail
   useEffect(() => {
-    // Verificar se o usuário acessou via link de confirmação do template Supabase
-    if (typeof window !== 'undefined') {
-      const hash = window.location.hash || '';
-      const search = window.location.search || '';
-      if (
-        hash.includes('type=signup') ||
-        hash.includes('type=email_confirmation') ||
-        search.includes('type=signup') ||
-        hash.includes('access_token')
-      ) {
-        setConfirmationBanner(
-          'Conta confirmada com sucesso! O template de ativação do Supabase foi validado e sua conta no ParedãoGK está 100% pronta para uso.'
-        );
-        setHasCompletedOnboarding(true);
-        setIsAuthModalOpen(false);
-        // Limpar os parâmetros de hash/token da barra de endereços para segurança e estética
-        window.history.replaceState(null, '', window.location.pathname);
-      }
+    const isEmailConfirmationRedirect =
+      typeof window !== 'undefined' &&
+      (window.location.hash.includes('type=signup') ||
+        window.location.hash.includes('type=email_confirmation') ||
+        window.location.search.includes('type=signup') ||
+        window.location.hash.includes('access_token'));
+
+    if (isEmailConfirmationRedirect) {
+      setConfirmationBanner(
+        'Conta confirmada com sucesso! O template de ativação do Supabase foi validado e sua conta no ParedãoGK está 100% pronta para uso.'
+      );
+      setHasCompletedOnboarding(true);
+      setIsAuthModalOpen(false);
     }
 
-    // 1. Limpar preventivamente resíduos legados de teste e carregar dados do armazenamento seguro offline
+    // 1. Limpar preventivamente resíduos legados de teste e nunca autenticar via cache local sem sessão real do Supabase
     clearLegacyTestCache().finally(() => {
-      getOfflineUserProfile()
-        .then((cachedProfile) => {
-          if (cachedProfile) {
-            setCurrentUser(cachedProfile);
-            setHasCompletedOnboarding(true);
-          }
-        })
-        .finally(() => {
-          if (!isSupabaseConfigured) {
-            setIsAuthSessionResolved(true);
-          }
-        });
-
       getOfflineMatches().then((cachedMatches) => {
         if (cachedMatches && cachedMatches.length > 0) {
           setMatches(cachedMatches);
         }
       });
+
+      if (!isSupabaseConfigured) {
+        clearOfflineUserProfile().catch(() => undefined);
+        setCurrentUser(INITIAL_USER);
+        setIsAuthSessionResolved(true);
+      }
     });
 
     if (!isSupabaseConfigured) return;
 
-    // Verificar se já existe uma sessão ativa
+    // Verificar sessão real ativa no Supabase Auth e carregar/garantir registro na tabela profiles
     supabase.auth
       .getSession()
       .then(async ({ data: { session } }) => {
         if (session?.user) {
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', session.user.id)
-            .maybeSingle();
-
-          if (profile) {
-            const rawSupabaseRole = String(profile.role || '');
-            const hasAdminFlag =
-              rawSupabaseRole.trim().toLowerCase() === 'admin' ||
-              Boolean(profile.is_admin);
-            setCurrentUser((prev) => ({
-              ...prev,
-              id: profile.id,
-              name: profile.name || prev.name,
-              nickname: profile.nickname || prev.nickname,
-              email: profile.email || session.user.email || prev.email,
-              cpf: profile.cpf || prev.cpf,
-              phone: profile.phone || prev.phone,
-              avatarUrl: profile.avatar_url || prev.avatarUrl,
-              role:
-                rawSupabaseRole === 'goleiro'
-                  ? 'goleiro'
-                  : rawSupabaseRole === 'contratante'
-                  ? 'contratante'
-                  : prev.role,
-              supabaseRole: rawSupabaseRole || undefined,
-              isAdmin: hasAdminFlag,
-              walletBalance: Number(profile.wallet_balance || 0),
-              cashbackBalance: Number(profile.cashback_balance || 0),
-              matchesPlayed: profile.matches_played || 0,
-              cleanSheets: profile.clean_sheets || 0,
-              penaltiesSaved: profile.penalties_saved || 0,
-              mvpCount: profile.mvp_count || 0,
-            }));
-            setHasCompletedOnboarding(true);
-          } else if (session.user.email) {
-            setCurrentUser((prev) => ({
-              ...prev,
-              id: session.user.id,
-              email: session.user.email || prev.email,
-            }));
-          }
+          const syncedProfile = await fetchOrCreateSupabaseProfile({
+            authUser: session.user,
+          });
+          setCurrentUser(syncedProfile);
+          setHasCompletedOnboarding(true);
+          setIsAuthModalOpen(false);
+        } else {
+          await clearOfflineUserProfile().catch(() => undefined);
+          setCurrentUser(INITIAL_USER);
         }
       })
       .finally(() => {
+        if (isEmailConfirmationRedirect && typeof window !== 'undefined') {
+          window.history.replaceState(null, '', window.location.pathname);
+        }
         setIsAuthSessionResolved(true);
       });
 
-    // Ouvir alterações de estado de autenticação (login/logout/confirmação via token)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_IN' && session?.user) {
-        supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', session.user.id)
-          .maybeSingle()
-          .then(({ data: profile }) => {
-            if (profile) {
-              const rawSupabaseRole = String(profile.role || '');
-              const hasAdminFlag =
-                rawSupabaseRole.trim().toLowerCase() === 'admin' ||
-                Boolean(profile.is_admin);
-              setCurrentUser((prev) => ({
-                ...prev,
-                id: profile.id,
-                name: profile.name || session.user?.user_metadata?.name || prev.name,
-                nickname: profile.nickname || session.user?.user_metadata?.nickname || prev.nickname,
-                email: profile.email || session.user?.email || prev.email,
-                cpf: profile.cpf || prev.cpf,
-                phone: profile.phone || prev.phone,
-                avatarUrl: profile.avatar_url || prev.avatarUrl,
-                role:
-                  rawSupabaseRole === 'goleiro'
-                    ? 'goleiro'
-                    : rawSupabaseRole === 'contratante'
-                    ? 'contratante'
-                    : prev.role,
-                supabaseRole: rawSupabaseRole || undefined,
-                isAdmin: hasAdminFlag,
-                walletBalance: Number(profile.wallet_balance || 0),
-                cashbackBalance: Number(profile.cashback_balance || 0),
-              }));
-              setHasCompletedOnboarding(true);
-              setIsAuthModalOpen(false);
-            }
-          });
+    // Ouvir alterações reais de estado de autenticação (login/logout/confirmação via token)
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (
+        (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') &&
+        session?.user
+      ) {
+        fetchOrCreateSupabaseProfile({ authUser: session.user }).then((syncedProfile) => {
+          setCurrentUser(syncedProfile);
+          setHasCompletedOnboarding(true);
+          if (event === 'SIGNED_IN') {
+            setIsAuthModalOpen(false);
+          }
+        });
       } else if (event === 'SIGNED_OUT') {
+        clearOfflineUserProfile().catch(() => undefined);
         setCurrentUser(INITIAL_USER);
         setIsArenaModerationOpen(false);
         setIsAdminFinancialOpen(false);
@@ -311,8 +247,9 @@ export default function App() {
     };
   }, []);
 
-  // Salvar alterações de perfil e partidas no armazenamento offline automaticamente
+  // Salvar alterações apenas de perfis autenticados (nunca gravar convidado como login local)
   useEffect(() => {
+    if (!currentUser.id || currentUser.id === 'usr-guest') return;
     saveOfflineUserProfile(currentUser).catch((e) => console.warn('[Save Offline Profile]', e));
   }, [currentUser]);
 
@@ -379,7 +316,7 @@ export default function App() {
     }
     setSecurityAlertBanner(
       reason ||
-        'Acesso bloqueado: área restrita exclusivamente ao administrador oficial do ParedãoGK (luizinhoitapevasp@gmail.com) ou perfil com role admin no Supabase. Você foi redirecionado para a página inicial.'
+        'Acesso bloqueado: área restrita exclusivamente ao administrador oficial do ParedãoGK (luizinhoitapevasp@gmail.com). Você foi redirecionado para a página inicial.'
     );
   };
 
@@ -923,8 +860,12 @@ export default function App() {
     });
   };
 
-  // Handle Logout (reset to onboarding / auth)
+  // Handle Logout (limpa cache local, encerra sessão real Supabase e volta para autenticação)
   const handleLogout = () => {
+    clearOfflineUserProfile().catch(() => undefined);
+    setCurrentUser(INITIAL_USER);
+    setIsArenaModerationOpen(false);
+    setIsAdminFinancialOpen(false);
     if (isSupabaseConfigured) {
       supabase.auth.signOut().catch((err) => console.warn('[Supabase SignOut]', err));
     }
@@ -1173,24 +1114,27 @@ export default function App() {
         onArenaSubmitted={handleArenaSubmitted}
       />
 
-      {/* Restricted Admin Moderation Modal (Aprovar / Arquivar / Excluir) */}
-      <ArenaModerationModal
-        isOpen={isArenaModerationOpen}
-        onClose={() => setIsArenaModerationOpen(false)}
-        user={currentUser}
-        arenas={arenas}
-        onArenaModerated={handleArenaModerated}
-        onUnauthorizedRedirect={handleUnauthorizedAdminRedirect}
-      />
+      {/* Restricted Admin Modals — montados apenas quando user.email === 'luizinhoitapevasp@gmail.com' */}
+      {isAdminUser && (
+        <>
+          <ArenaModerationModal
+            isOpen={isArenaModerationOpen}
+            onClose={() => setIsArenaModerationOpen(false)}
+            user={currentUser}
+            arenas={arenas}
+            onArenaModerated={handleArenaModerated}
+            onUnauthorizedRedirect={handleUnauthorizedAdminRedirect}
+          />
 
-      {/* Restricted Admin Financial Console (Saques Pix CajuPay & Webhooks HMAC-SHA256) */}
-      <AdminFinancialModal
-        isOpen={isAdminFinancialOpen}
-        onClose={() => setIsAdminFinancialOpen(false)}
-        user={currentUser}
-        onWithdrawalsCountChange={(count) => setPendingWithdrawalsCount(count)}
-        onUnauthorizedRedirect={handleUnauthorizedAdminRedirect}
-      />
+          <AdminFinancialModal
+            isOpen={isAdminFinancialOpen}
+            onClose={() => setIsAdminFinancialOpen(false)}
+            user={currentUser}
+            onWithdrawalsCountChange={(count) => setPendingWithdrawalsCount(count)}
+            onUnauthorizedRedirect={handleUnauthorizedAdminRedirect}
+          />
+        </>
+      )}
 
       {/* Intelligent GK Radar Matchmaking Modal */}
       <IntelligentCallModal

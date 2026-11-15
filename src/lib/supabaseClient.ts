@@ -90,6 +90,121 @@ export async function sendWelcomeEmailNotification(payload: {
   }
 }
 
+function mapProfileRowToUserProfile(
+  row: any,
+  authUser: { id: string; email?: string | null; user_metadata?: Record<string, any> },
+  fallbackRole: 'contratante' | 'goleiro' = 'contratante'
+): UserProfile {
+  const rawRole = String(row?.role || authUser.user_metadata?.role || fallbackRole);
+  const uiRole: 'contratante' | 'goleiro' = rawRole === 'goleiro' ? 'goleiro' : 'contratante';
+  const resolvedEmail = String(row?.email || authUser.email || '').trim();
+
+  return {
+    id: String(row?.id || authUser.id),
+    name: row?.name || authUser.user_metadata?.name || resolvedEmail.split('@')[0] || 'Atleta ParedãoGK',
+    nickname: row?.nickname || authUser.user_metadata?.nickname || 'Itapeva',
+    cpf: row?.cpf || authUser.user_metadata?.formatted_cpf || authUser.user_metadata?.cpf || '',
+    isCpfVerified: Boolean(row?.is_cpf_verified ?? row?.cpf ?? authUser.user_metadata?.cpf),
+    email: resolvedEmail,
+    phone: row?.phone || authUser.user_metadata?.phone || '',
+    birthDate: row?.birth_date || authUser.user_metadata?.birth_date || '',
+    age: Number(row?.age || authUser.user_metadata?.age || 18),
+    role: uiRole,
+    supabaseRole: rawRole,
+    isAdmin: resolvedEmail.toLowerCase() === 'luizinhoitapevasp@gmail.com',
+    avatarUrl: row?.avatar_url || '',
+    rating: Number(row?.rating ?? 5.0),
+    matchesPlayed: Number(row?.matches_played ?? 0),
+    cleanSheets: Number(row?.clean_sheets ?? 0),
+    penaltiesSaved: Number(row?.penalties_saved ?? 0),
+    mvpCount: Number(row?.mvp_count ?? 0),
+    city: row?.city || 'Itapeva - SP',
+    neighborhood: row?.neighborhood || 'Centro',
+    height: row?.height || authUser.user_metadata?.height || undefined,
+    dominantFoot: row?.dominant_foot || authUser.user_metadata?.dominant_foot || undefined,
+    categories: row?.categories || authUser.user_metadata?.categories || undefined,
+    favoriteGloves: row?.favorite_gloves || authUser.user_metadata?.favorite_gloves || undefined,
+    preferredCache: Number(row?.preferred_cache ?? 20),
+    technicalLevel: row?.technical_level || 'Iniciante',
+    pricingTier: row?.pricing_tier || 'faixa_1',
+    walletBalance: Number(row?.wallet_balance ?? 0),
+    pendingBalance: Number(row?.pending_balance ?? 0),
+    cashbackBalance: Number(row?.cashback_balance ?? 0),
+    isEliteMember: Boolean(row?.is_elite_member),
+    createdAt: row?.created_at || new Date().toISOString(),
+  };
+}
+
+/**
+ * Garante leitura e gravação real do perfil do usuário autenticado na tabela 'profiles' do Supabase.
+ */
+export async function fetchOrCreateSupabaseProfile(params: {
+  authUser: { id: string; email?: string | null; user_metadata?: Record<string, any> };
+  fallbackRole?: 'contratante' | 'goleiro';
+}): Promise<UserProfile> {
+  const { authUser, fallbackRole = 'contratante' } = params;
+  const meta = authUser.user_metadata || {};
+
+  const { data: existingProfile, error: selectErr } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', authUser.id)
+    .maybeSingle();
+
+  if (selectErr) {
+    console.warn('[Supabase Profile Read Warning]', selectErr.message);
+  }
+
+  if (existingProfile) {
+    return mapProfileRowToUserProfile(existingProfile, authUser, fallbackRole);
+  }
+
+  const rawRole = String(meta.role || fallbackRole);
+  const newProfileRow = {
+    id: authUser.id,
+    name: meta.name || authUser.email?.split('@')[0] || 'Atleta ParedãoGK',
+    nickname: meta.nickname || 'Itapeva',
+    cpf: meta.formatted_cpf || meta.cpf || '',
+    is_cpf_verified: Boolean(meta.cpf),
+    email: (authUser.email || '').trim(),
+    phone: meta.phone || '',
+    birth_date: meta.birth_date || '',
+    age: Number(meta.age || 18),
+    role: rawRole === 'goleiro' ? 'goleiro' : 'contratante',
+    avatar_url: '',
+    rating: 5.0,
+    matches_played: 0,
+    clean_sheets: 0,
+    penalties_saved: 0,
+    mvp_count: 0,
+    city: 'Itapeva - SP',
+    neighborhood: 'Centro',
+    height: rawRole === 'goleiro' ? meta.height || '1.88m' : null,
+    dominant_foot: rawRole === 'goleiro' ? meta.dominant_foot || 'destro' : null,
+    categories: rawRole === 'goleiro' ? meta.categories || ['society', 'futsal'] : null,
+    favorite_gloves: rawRole === 'goleiro' ? meta.favorite_gloves || null : null,
+    preferred_cache: 20,
+    technical_level: 'Iniciante',
+    wallet_balance: 0.0,
+    pending_balance: 0.0,
+    cashback_balance: 0.0,
+    is_elite_member: false,
+    created_at: new Date().toISOString(),
+  };
+
+  const { data: insertedProfile, error: upsertErr } = await supabase
+    .from('profiles')
+    .upsert(newProfileRow, { onConflict: 'id' })
+    .select('*')
+    .maybeSingle();
+
+  if (upsertErr) {
+    console.warn('[Supabase Profile Upsert Warning]', upsertErr.message);
+  }
+
+  return mapProfileRowToUserProfile(insertedProfile || newProfileRow, authUser, fallbackRole);
+}
+
 /**
  * Salva a avaliação pós-jogo na tabela 'match_reviews' do Supabase
  * e atualiza a média e histórico no perfil do goleiro ('profiles')
@@ -1349,57 +1464,44 @@ export interface AdminCheckSubject {
   isAdmin?: boolean | null;
 }
 
+/**
+ * Verificação estrita de Administrador: somente luizinhoitapevasp@gmail.com
+ */
 export function isAuthorizedAdmin(subject?: string | AdminCheckSubject | null): boolean {
   if (!subject) return false;
-
-  if (typeof subject === 'string') {
-    return subject.trim().toLowerCase() === OFFICIAL_ADMIN_EMAIL;
-  }
-
-  const normalizedEmail = (subject.email || '').trim().toLowerCase();
-  if (normalizedEmail === OFFICIAL_ADMIN_EMAIL) {
-    return true;
-  }
-
-  const normalizedSupabaseRole = (subject.supabaseRole || '').trim().toLowerCase();
-  const normalizedRole = (subject.role || '').trim().toLowerCase();
-
-  return Boolean(
-    subject.isAdmin === true ||
-      normalizedSupabaseRole === 'admin' ||
-      normalizedRole === 'admin'
-  );
+  const rawEmail = typeof subject === 'string' ? subject : subject.email;
+  if (!rawEmail) return false;
+  return rawEmail.trim().toLowerCase() === OFFICIAL_ADMIN_EMAIL;
 }
 
 /**
- * Valida acesso administrativo diretamente no perfil do Supabase (e-mail oficial ou role === 'admin')
+ * Valida acesso administrativo diretamente contra a sessão autenticada do Supabase Auth.
  */
 export async function verifySupabaseAdminAccess(
   subject?: AdminCheckSubject | null
 ): Promise<boolean> {
-  if (!subject) return false;
   if (!isAuthorizedAdmin(subject)) return false;
 
-  if (!isSupabaseConfigured || !subject.id || subject.id === 'usr-guest') {
-    return isAuthorizedAdmin(subject);
+  if (!isSupabaseConfigured) {
+    return false;
   }
 
   try {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('email, role')
-      .eq('id', subject.id)
-      .maybeSingle();
+    const [userRes, sessionRes] = await Promise.all([
+      supabase.auth.getUser(),
+      supabase.auth.getSession(),
+    ]);
 
-    if (error || !data) {
-      return isAuthorizedAdmin(subject);
+    const verifiedEmail =
+      userRes.data?.user?.email || sessionRes.data?.session?.user?.email;
+
+    if (!verifiedEmail) {
+      return false;
     }
 
-    const dbEmail = String(data.email || '').trim().toLowerCase();
-    const dbRole = String(data.role || '').trim().toLowerCase();
-    return dbEmail === OFFICIAL_ADMIN_EMAIL || dbRole === 'admin';
+    return verifiedEmail.trim().toLowerCase() === OFFICIAL_ADMIN_EMAIL;
   } catch {
-    return isAuthorizedAdmin(subject);
+    return false;
   }
 }
 
@@ -1670,6 +1772,13 @@ export async function moderateArenaInSupabase(
     return { synced: false };
   }
 
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!isAuthorizedAdmin(session?.user?.email)) {
+    return { synced: false };
+  }
+
   try {
     if (action === 'delete') {
       const { error } = await supabase.from('arenas').delete().eq('id', arenaId);
@@ -1861,6 +1970,15 @@ export async function fetchAdminPixWithdrawalsFromSupabase(): Promise<{
   withdrawals: AdminPixWithdrawal[];
   syncedFromSupabase: boolean;
 }> {
+  if (isSupabaseConfigured) {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!isAuthorizedAdmin(session?.user?.email)) {
+      return { withdrawals: [], syncedFromSupabase: false };
+    }
+  }
+
   const localCache = getOfflineAdminWithdrawals();
   let syncedFromSupabase = false;
   let remoteList: AdminPixWithdrawal[] = [];
@@ -1952,6 +2070,9 @@ export async function processAdminPixWithdrawalInSupabase(params: {
   rejectionReason?: string;
   adminEmail: string;
 }): Promise<{ updated: AdminPixWithdrawal; syncedToSupabase: boolean }> {
+  if (!isAuthorizedAdmin(params.adminEmail)) {
+    throw new Error('Acesso negado: apenas o administrador oficial pode processar saques Pix.');
+  }
   const nowIso = new Date().toISOString();
   const nextStatus: AdminPixWithdrawalStatus =
     params.action === 'reject' ? 'rejected' : 'approved';
@@ -2069,6 +2190,15 @@ export async function fetchCajuPayWebhookConfigAndLogs(defaultEndpointUrl: strin
     updatedAt: new Date().toISOString(),
   };
 
+  if (isSupabaseConfigured) {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!isAuthorizedAdmin(session?.user?.email)) {
+      return { config: defaultConfig, logs: [], syncedFromSupabase: false };
+    }
+  }
+
   let config = defaultConfig;
   const logsMap = new Map<string, CajuPayWebhookLog>();
   getOfflineWebhookLogs().forEach((l) => logsMap.set(l.id, l));
@@ -2173,6 +2303,18 @@ export async function saveCajuPayWebhookConfig(params: {
   config: CajuPayWebhookConfig;
   adminEmail: string;
 }): Promise<{ config: CajuPayWebhookConfig; syncedToSupabase: boolean }> {
+  if (!isAuthorizedAdmin(params.adminEmail)) {
+    throw new Error('Acesso administrativo negado: somente luizinhoitapevasp@gmail.com pode alterar webhooks.');
+  }
+  if (isSupabaseConfigured) {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!isAuthorizedAdmin(session?.user?.email)) {
+      throw new Error('Sessão administrativa inválida no Supabase Auth.');
+    }
+  }
+
   const updatedConfig: CajuPayWebhookConfig = {
     ...params.config,
     updatedAt: new Date().toISOString(),
@@ -2222,6 +2364,15 @@ export async function dispatchCajuPayWebhookTest(params: {
   simulateInvalidSignature?: boolean;
   customAmount?: number;
 }): Promise<{ log: CajuPayWebhookLog; syncedToSupabase: boolean }> {
+  if (isSupabaseConfigured) {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!isAuthorizedAdmin(session?.user?.email)) {
+      throw new Error('Acesso administrativo negado ao disparar teste de webhook.');
+    }
+  }
+
   let log: CajuPayWebhookLog | null = null;
 
   try {
@@ -2308,41 +2459,54 @@ export function subscribeToAdminFinancialRealtime(callbacks: {
 }) {
   if (!isSupabaseConfigured) return () => {};
 
-  const channel = supabase.channel('paredaogk-admin-financial-realtime');
+  let isDisposed = false;
+  let activeChannel: ReturnType<typeof supabase.channel> | null = null;
 
-  channel.on(
-    'postgres_changes',
-    { event: '*', schema: 'public', table: 'wallet_transactions' },
-    () => {
-      callbacks.onWithdrawalChange();
+  supabase.auth.getSession().then(({ data: { session } }) => {
+    if (isDisposed || !isAuthorizedAdmin(session?.user?.email)) {
+      return;
     }
-  );
 
-  channel.on(
-    'postgres_changes',
-    { event: 'INSERT', schema: 'public', table: 'cajupay_webhook_logs' },
-    (payload) => {
-      const row = payload.new as any;
-      if (!row) return;
-      callbacks.onWebhookLog({
-        id: String(row.id),
-        event: row.event || 'payment.confirmed',
-        endpointUrl: row.endpoint_url || '/api/webhook-caju',
-        httpStatus: Number(row.http_status || 200),
-        hmacValid: Boolean(row.hmac_valid),
-        signatureHeader: row.signature_header || '',
-        payload: row.payload || {},
-        responseBody: row.response_body || undefined,
-        source: (row.source || 'live') as CajuPayWebhookLog['source'],
-        createdAt: row.created_at || new Date().toISOString(),
-      });
-    }
-  );
+    const channel = supabase.channel('paredaogk-admin-financial-realtime');
 
-  channel.subscribe();
+    channel.on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'wallet_transactions' },
+      () => {
+        callbacks.onWithdrawalChange();
+      }
+    );
+
+    channel.on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'cajupay_webhook_logs' },
+      (payload) => {
+        const row = payload.new as any;
+        if (!row) return;
+        callbacks.onWebhookLog({
+          id: String(row.id),
+          event: row.event || 'payment.confirmed',
+          endpointUrl: row.endpoint_url || '/api/webhook-caju',
+          httpStatus: Number(row.http_status || 200),
+          hmacValid: Boolean(row.hmac_valid),
+          signatureHeader: row.signature_header || '',
+          payload: row.payload || {},
+          responseBody: row.response_body || undefined,
+          source: (row.source || 'live') as CajuPayWebhookLog['source'],
+          createdAt: row.created_at || new Date().toISOString(),
+        });
+      }
+    );
+
+    channel.subscribe();
+    activeChannel = channel;
+  });
 
   return () => {
-    supabase.removeChannel(channel);
+    isDisposed = true;
+    if (activeChannel) {
+      supabase.removeChannel(activeChannel);
+    }
   };
 }
 

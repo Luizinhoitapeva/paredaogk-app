@@ -164,6 +164,22 @@ export async function clearLegacyTestCache(): Promise<void> {
 }
 
 /**
+ * Limpa o perfil salvo localmente (usado no logout ou quando não há sessão Supabase ativa)
+ */
+export async function clearOfflineUserProfile(): Promise<void> {
+  try {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(`${LOCAL_STORAGE_PREFIX}profile`);
+    }
+    const db = await openDatabase();
+    const tx = db.transaction(STORES.USER_PROFILE, 'readwrite');
+    tx.objectStore(STORES.USER_PROFILE).clear();
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+/**
  * Obtém o perfil do usuário salvo offline garantindo sanitização de dados fake
  */
 export async function getOfflineUserProfile(): Promise<UserProfile | null> {

@@ -125,6 +125,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
   const hasAdminAccess = isAuthorizedAdmin(user);
 
   const loadWithdrawals = async () => {
+    if (!isAuthorizedAdmin(user)) return;
     setIsLoadingWithdrawals(true);
     try {
       const res = await fetchAdminPixWithdrawalsFromSupabase();
@@ -138,6 +139,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
   };
 
   const loadWebhooks = async () => {
+    if (!isAuthorizedAdmin(user)) return;
     setIsLoadingWebhooks(true);
     try {
       const res = await fetchCajuPayWebhookConfigAndLogs(defaultWebhookEndpoint);

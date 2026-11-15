@@ -60,7 +60,7 @@ interface AdminRouteGuardProps {
 }
 
 const DEFAULT_DENIED_MESSAGE =
-  'Acesso bloqueado: área administrativa restrita ao administrador oficial (luizinhoitapevasp@gmail.com) ou perfil com role admin no Supabase.';
+  'Acesso bloqueado: o painel administrativo é exclusivo do e-mail oficial luizinhoitapevasp@gmail.com.';
 
 export const AdminRouteGuard: React.FC<AdminRouteGuardProps> = ({
   user,

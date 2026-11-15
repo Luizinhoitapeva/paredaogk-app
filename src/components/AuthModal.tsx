@@ -29,7 +29,8 @@ import {
   supabase,
   isSupabaseConfigured,
   sendWelcomeEmailNotification,
-  getAuthRedirectUrl
+  getAuthRedirectUrl,
+  fetchOrCreateSupabaseProfile,
 } from '../lib/supabaseClient';
 
 interface AuthModalProps {
@@ -115,143 +116,72 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setSuccessNotice('');
 
     // ==========================================
-    // FLUXO DE LOGIN
+    // FLUXO DE LOGIN REAL (SUPABASE AUTH)
     // ==========================================
     if (authMode === 'login') {
-      if (!email || !password) {
+      if (!email.trim() || !password) {
         setErrorMessage('Por favor, informe seu e-mail e senha.');
         return;
       }
+
+      if (!isSupabaseConfigured) {
+        setErrorMessage(
+          'Conexão com o Supabase não configurada. Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para autenticar.'
+        );
+        return;
+      }
+
       setIsSubmitting(true);
 
       try {
-        let loggedUser: UserProfile | null = null;
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
 
-        if (isSupabaseConfigured) {
-          // Autenticação oficial no Supabase Auth
-          const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-            email,
-            password,
-          });
-
-          if (authError) {
-            console.error('[Supabase Auth Login Error]', authError);
-            let msg = 'Falha ao autenticar. Verifique o e-mail e a senha informados.';
-            if (authError.message.includes('Invalid login credentials')) {
-              msg = 'E-mail ou senha incorretos.';
-            } else if (authError.message.includes('Email not confirmed')) {
-              msg = 'E-mail pendente de confirmação. Verifique sua caixa de entrada.';
-            }
-            setErrorMessage(msg);
-            setIsSubmitting(false);
-            return;
+        if (authError || !authData?.user || !authData?.session) {
+          console.error('[Supabase Auth Login Error]', authError);
+          let msg = 'E-mail ou senha inválidos. Verifique suas credenciais no Supabase Auth.';
+          const rawMsg = authError?.message || '';
+          if (rawMsg.includes('Invalid login credentials')) {
+            msg = 'E-mail ou senha incorretos.';
+          } else if (rawMsg.includes('Email not confirmed')) {
+            msg = 'E-mail pendente de confirmação. Verifique sua caixa de entrada.';
+          } else if (rawMsg) {
+            msg = rawMsg;
           }
-
-          const userId = authData.user?.id || 'usr-logged';
-
-          // Buscar dados complementares da tabela 'profiles' no Supabase
-          const { data: profileData, error: profileErr } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', userId)
-            .maybeSingle();
-
-          if (profileErr) {
-            console.warn('[Supabase Profile Query Warning]', profileErr);
-          }
-
-          if (profileData) {
-            const rawSupabaseRole = String(profileData.role || '');
-            const hasAdminFlag =
-              rawSupabaseRole.trim().toLowerCase() === 'admin' ||
-              Boolean(profileData.is_admin);
-            loggedUser = {
-              id: profileData.id,
-              name: profileData.name || authData.user?.user_metadata?.name || 'Atleta ParedãoGK',
-              nickname: profileData.nickname || authData.user?.user_metadata?.nickname || 'Itapeva',
-              cpf: profileData.cpf || '',
-              isCpfVerified: Boolean(profileData.is_cpf_verified ?? profileData.cpf),
-              email: profileData.email || email,
-              phone: profileData.phone || '',
-              birthDate: profileData.birth_date || '',
-              age: profileData.age || 18,
-              role: rawSupabaseRole === 'goleiro' ? 'goleiro' : role === 'goleiro' ? 'goleiro' : 'contratante',
-              supabaseRole: rawSupabaseRole || undefined,
-              isAdmin: hasAdminFlag,
-              avatarUrl: profileData.avatar_url || '',
-              rating: Number(profileData.rating || 5.0),
-              matchesPlayed: Number(profileData.matches_played || 0),
-              cleanSheets: Number(profileData.clean_sheets || 0),
-              penaltiesSaved: Number(profileData.penalties_saved || 0),
-              mvpCount: Number(profileData.mvp_count || 0),
-              city: profileData.city || 'Itapeva - SP',
-              neighborhood: profileData.neighborhood || 'Centro',
-              height: profileData.height,
-              dominantFoot: profileData.dominant_foot,
-              categories: profileData.categories,
-              favoriteGloves: profileData.favorite_gloves,
-              preferredCache: Number(profileData.preferred_cache || 20),
-              technicalLevel: profileData.technical_level || 'Iniciante',
-              pricingTier: profileData.pricing_tier || 'faixa_1',
-              walletBalance: Number(profileData.wallet_balance || 0),
-              pendingBalance: Number(profileData.pending_balance || 0),
-              cashbackBalance: Number(profileData.cashback_balance || 0),
-              isEliteMember: Boolean(profileData.is_elite_member),
-              createdAt: profileData.created_at || new Date().toISOString()
-            };
-          }
+          setErrorMessage(msg);
+          setIsSubmitting(false);
+          return;
         }
 
-        // Fallback quando offline ou sem perfil encontrado no Supabase
-        if (!loggedUser) {
-          loggedUser = {
-            id: `usr-${Date.now()}`,
-            name: name || email.split('@')[0] || 'Atleta ParedãoGK',
-            nickname: nickname || 'Itapeva',
-            cpf: cpf || '',
-            isCpfVerified: Boolean(cpf),
-            email: email || '',
-            phone: phone || '',
-            birthDate: birthDate || '',
-            age: 18,
-            role: role,
-            avatarUrl: '',
-            rating: 5.0,
-            matchesPlayed: 0,
-            cleanSheets: 0,
-            penaltiesSaved: 0,
-            mvpCount: 0,
-            city: 'Itapeva - SP',
-            neighborhood: 'Centro',
-            height: height,
-            dominantFoot: dominantFoot,
-            categories: selectedCategories as any,
-            favoriteGloves: favoriteGloves,
-            preferredCache: 20,
-            technicalLevel: 'Iniciante',
-            pricingTier: 'faixa_1',
-            walletBalance: 0.00,
-            pendingBalance: 0.00,
-            cashbackBalance: 0.00,
-            isEliteMember: false,
-            createdAt: new Date().toISOString()
-          };
-        }
+        // Ler ou criar o perfil oficial na tabela 'profiles' do Supabase
+        const loggedUser = await fetchOrCreateSupabaseProfile({
+          authUser: authData.user,
+          fallbackRole: role,
+        });
 
         setIsSubmitting(false);
         onAuthSuccess(loggedUser);
         onClose();
       } catch (err: any) {
         console.error('[Login Processing Error]', err);
-        setErrorMessage(err?.message || 'Erro inesperado ao realizar login.');
+        setErrorMessage(err?.message || 'Erro inesperado ao autenticar no Supabase.');
         setIsSubmitting(false);
       }
       return;
     }
 
     // ==========================================
-    // FLUXO DE CADASTRO RIGOROSO NO SUPABASE
+    // FLUXO DE CADASTRO REAL NO SUPABASE AUTH + PROFILES
     // ==========================================
+    if (!isSupabaseConfigured) {
+      setErrorMessage(
+        'Conexão com o Supabase não configurada. Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para cadastrar usuários.'
+      );
+      return;
+    }
+
     if (!name.trim()) {
       setErrorMessage('Informe seu nome completo.');
       return;
@@ -287,100 +217,93 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setIsSubmitting(true);
 
     try {
-      let createdUserId = `usr-${Date.now()}`;
-      let isEmailConfirmationPending = false;
+      const authRedirectUrl = getAuthRedirectUrl();
 
-      // 3. Cadastro direto no Supabase Auth com emailRedirectTo dinâmico
-      if (isSupabaseConfigured) {
-        const authRedirectUrl = getAuthRedirectUrl();
-
-        const { data: authData, error: authError } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
-          options: {
-            emailRedirectTo: authRedirectUrl,
-            data: {
-              name: name.trim(),
-              nickname: nickname.trim() || name.split(' ')[0],
-              cpf: cpf.replace(/\D/g, ''),
-              formatted_cpf: cpf,
-              phone: phone.replace(/\D/g, ''),
-              role: role,
-              birth_date: birthDate,
-              age: age,
-              height: role === 'goleiro' ? height : null,
-              dominant_foot: role === 'goleiro' ? dominantFoot : null,
-              categories: role === 'goleiro' ? selectedCategories : null,
-              favorite_gloves: role === 'goleiro' ? favoriteGloves : null,
-            }
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          emailRedirectTo: authRedirectUrl,
+          data: {
+            name: name.trim(),
+            nickname: nickname.trim() || name.split(' ')[0],
+            cpf: cpf.replace(/\D/g, ''),
+            formatted_cpf: cpf,
+            phone: phone.replace(/\D/g, ''),
+            role: role,
+            birth_date: birthDate,
+            age: age,
+            height: role === 'goleiro' ? height : null,
+            dominant_foot: role === 'goleiro' ? dominantFoot : null,
+            categories: role === 'goleiro' ? selectedCategories : null,
+            favorite_gloves: role === 'goleiro' ? favoriteGloves : null,
           }
-        });
+        }
+      });
 
-        if (authError) {
-          console.error('[Supabase Signup Error]', authError);
-          let friendlyMsg = authError.message;
-          if (authError.message.includes('User already registered')) {
-            friendlyMsg = 'Este e-mail já está cadastrado. Alterne para a aba Entrar.';
-          } else if (authError.message.includes('Password should be at least')) {
-            friendlyMsg = 'A senha de acesso deve ter pelo menos 6 caracteres.';
-          }
-          setErrorMessage(friendlyMsg);
+      if (authError || !authData?.user) {
+        console.error('[Supabase Signup Error]', authError);
+        let friendlyMsg = authError?.message || 'Não foi possível concluir o cadastro no Supabase.';
+        if (friendlyMsg.includes('User already registered')) {
+          friendlyMsg = 'Este e-mail já está cadastrado. Alterne para a aba Entrar.';
+        } else if (friendlyMsg.includes('Password should be at least')) {
+          friendlyMsg = 'A senha de acesso deve ter pelo menos 6 caracteres.';
+        }
+        setErrorMessage(friendlyMsg);
+        setIsSubmitting(false);
+        return;
+      }
+
+      const createdUserId = authData.user.id;
+      const isEmailConfirmationPending = !authData.session;
+
+      // 4. Persistência direta na tabela 'profiles' do Supabase
+      const profileRecord = {
+        id: createdUserId,
+        name: name.trim(),
+        nickname: nickname.trim() || name.split(' ')[0],
+        cpf: cpf,
+        is_cpf_verified: true,
+        email: email.trim(),
+        phone: phone,
+        birth_date: birthDate,
+        age: age,
+        role: role,
+        avatar_url: '',
+        rating: 5.0,
+        matches_played: 0,
+        clean_sheets: 0,
+        penalties_saved: 0,
+        mvp_count: 0,
+        city: 'Itapeva - SP',
+        neighborhood: 'Centro',
+        height: role === 'goleiro' ? height : null,
+        dominant_foot: role === 'goleiro' ? dominantFoot : null,
+        categories: role === 'goleiro' ? selectedCategories : null,
+        favorite_gloves: role === 'goleiro' ? favoriteGloves : null,
+        preferred_cache: 20,
+        technical_level: 'Iniciante',
+        wallet_balance: 0.00,
+        pending_balance: 0.00,
+        cashback_balance: 0.00,
+        is_elite_member: false,
+        created_at: new Date().toISOString()
+      };
+
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .upsert(profileRecord, { onConflict: 'id' });
+
+      if (profileError) {
+        console.warn('[Supabase Profiles Insert Note]', profileError.message);
+        if (authData.session) {
+          setErrorMessage(`Usuário autenticado, mas houve falha ao gravar perfil no Supabase: ${profileError.message}`);
           setIsSubmitting(false);
           return;
         }
-
-        if (authData?.user?.id) {
-          createdUserId = authData.user.id;
-        }
-
-        // Verifica se a confirmação de e-mail está configurada e pendente no Supabase
-        if (authData?.user && !authData?.session) {
-          isEmailConfirmationPending = true;
-        }
-
-        // 4. Inserção direta no banco de dados Supabase (tabela: 'profiles')
-        const profileRecord = {
-          id: createdUserId,
-          name: name.trim(),
-          nickname: nickname.trim() || name.split(' ')[0],
-          cpf: cpf,
-          is_cpf_verified: true,
-          email: email.trim(),
-          phone: phone,
-          birth_date: birthDate,
-          age: age,
-          role: role,
-          avatar_url: '',
-          rating: 5.0,
-          matches_played: 0,
-          clean_sheets: 0,
-          penalties_saved: 0,
-          mvp_count: 0,
-          city: 'Itapeva - SP',
-          neighborhood: 'Centro',
-          height: role === 'goleiro' ? height : null,
-          dominant_foot: role === 'goleiro' ? dominantFoot : null,
-          categories: role === 'goleiro' ? selectedCategories : null,
-          favorite_gloves: role === 'goleiro' ? favoriteGloves : null,
-          preferred_cache: 20,
-          technical_level: 'Iniciante',
-          wallet_balance: 0.00,
-          pending_balance: 0.00,
-          cashback_balance: 0.00,
-          is_elite_member: false,
-          created_at: new Date().toISOString()
-        };
-
-        const { error: profileError } = await supabase
-          .from('profiles')
-          .upsert(profileRecord, { onConflict: 'id' });
-
-        if (profileError) {
-          console.warn('[Supabase Profiles Insert Note]', profileError.message);
-        }
       }
 
-      // 5. Integração com o sistema de e-mails (E-mail de Boas-vindas oficial)
+      // 5. E-mail de Boas-vindas oficial
       await sendWelcomeEmailNotification({
         email: email.trim(),
         name: name.trim(),
@@ -388,59 +311,65 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         nickname: nickname.trim() || name.split(' ')[0]
       });
 
-      // 6. Criar perfil ativo da aplicação
-      const newUserProfile: UserProfile = {
-        id: createdUserId,
-        name: name.trim(),
-        nickname: nickname.trim() || name.split(' ')[0],
-        cpf: cpf,
-        isCpfVerified: true,
-        email: email.trim(),
-        phone: phone,
-        birthDate: birthDate,
-        age: age,
-        role: role,
-        avatarUrl: '',
-        rating: 5.0,
-        matchesPlayed: 0,
-        cleanSheets: 0,
-        penaltiesSaved: 0,
-        mvpCount: 0,
-        city: 'Itapeva - SP',
-        neighborhood: 'Centro',
-        height: role === 'goleiro' ? height : undefined,
-        dominantFoot: role === 'goleiro' ? dominantFoot : undefined,
-        categories: role === 'goleiro' ? (selectedCategories as any) : undefined,
-        favoriteGloves: role === 'goleiro' ? favoriteGloves : undefined,
-        preferredCache: 20,
-        technicalLevel: 'Iniciante',
-        pricingTier: 'faixa_1',
-        walletBalance: 0.00,
-        pendingBalance: 0.00,
-        cashbackBalance: 0.00,
-        isEliteMember: false,
-        createdAt: new Date().toISOString()
-      };
-
-      // Se a confirmação de e-mail estiver ativa no Supabase, exibe a tela de aviso orientativo
+      // Se a confirmação de e-mail estiver ativa no Supabase, exigir validação antes de liberar acesso
       if (isEmailConfirmationPending) {
+        const pendingProfile: UserProfile = {
+          id: createdUserId,
+          name: name.trim(),
+          nickname: nickname.trim() || name.split(' ')[0],
+          cpf: cpf,
+          isCpfVerified: true,
+          email: email.trim(),
+          phone: phone,
+          birthDate: birthDate,
+          age: age,
+          role: role,
+          supabaseRole: role,
+          isAdmin: email.trim().toLowerCase() === 'luizinhoitapevasp@gmail.com',
+          avatarUrl: '',
+          rating: 5.0,
+          matchesPlayed: 0,
+          cleanSheets: 0,
+          penaltiesSaved: 0,
+          mvpCount: 0,
+          city: 'Itapeva - SP',
+          neighborhood: 'Centro',
+          height: role === 'goleiro' ? height : undefined,
+          dominantFoot: role === 'goleiro' ? dominantFoot : undefined,
+          categories: role === 'goleiro' ? (selectedCategories as any) : undefined,
+          favoriteGloves: role === 'goleiro' ? favoriteGloves : undefined,
+          preferredCache: 20,
+          technicalLevel: 'Iniciante',
+          pricingTier: 'faixa_1',
+          walletBalance: 0.00,
+          pendingBalance: 0.00,
+          cashbackBalance: 0.00,
+          isEliteMember: false,
+          createdAt: new Date().toISOString()
+        };
         setIsSubmitting(false);
         setConfirmationPendingData({
           email: email.trim(),
           name: name.trim(),
           role: role,
-          userProfile: newUserProfile,
+          userProfile: pendingProfile,
         });
         return;
       }
 
-      setSuccessNotice('Cadastro concluído com sucesso! E-mail de confirmação e boas-vindas disparado.');
-      
+      // Ler perfil persistido diretamente do Supabase
+      const persistedUserProfile = await fetchOrCreateSupabaseProfile({
+        authUser: authData.user,
+        fallbackRole: role,
+      });
+
+      setSuccessNotice('Cadastro concluído e gravado no Supabase com sucesso!');
+
       setTimeout(() => {
         setIsSubmitting(false);
-        onAuthSuccess(newUserProfile);
+        onAuthSuccess(persistedUserProfile);
         onClose();
-      }, 500);
+      }, 450);
     } catch (error: any) {
       console.error('[Registration General Error]', error);
       setErrorMessage(error?.message || 'Falha ao processar cadastro no Supabase.');
@@ -450,29 +379,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleResendConfirmation = async () => {
     if (!confirmationPendingData) return;
+    if (!isSupabaseConfigured) {
+      setResendStatus('Conexão com Supabase não configurada.');
+      return;
+    }
     setIsResending(true);
     setResendStatus(null);
     try {
-      if (isSupabaseConfigured) {
-        const authRedirectUrl = getAuthRedirectUrl();
-        const { error } = await supabase.auth.resend({
-          type: 'signup',
-          email: confirmationPendingData.email,
-          options: {
-            emailRedirectTo: authRedirectUrl,
-          },
-        });
-        if (error) throw error;
-      }
-      await sendWelcomeEmailNotification({
+      const authRedirectUrl = getAuthRedirectUrl();
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
         email: confirmationPendingData.email,
-        name: confirmationPendingData.name,
-        role: confirmationPendingData.role,
+        options: {
+          emailRedirectTo: authRedirectUrl,
+        },
       });
-      setResendStatus('E-mail reenviado com sucesso! Verifique sua caixa de entrada e pasta de spam.');
+      if (error) throw error;
+
+      setResendStatus('E-mail reenviado pelo Supabase Auth! Verifique sua caixa de entrada e pasta de spam.');
     } catch (err: any) {
       console.warn('[Resend warning]', err);
-      setResendStatus('Novo e-mail enviado! Verifique também sua pasta de lixo eletrônico.');
+      setResendStatus(err?.message || 'Não foi possível reenviar o e-mail de confirmação agora.');
     } finally {
       setIsResending(false);
     }
@@ -556,27 +483,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <span>{isResending ? 'Reenviando template...' : 'Reenviar E-mail de Confirmação'}</span>
                 </button>
 
-                <div className="grid grid-cols-2 gap-2.5">
+                <div className="pt-1">
                   <button
                     type="button"
                     onClick={() => {
                       setConfirmationPendingData(null);
                       setAuthMode('login');
                     }}
-                    className="h-11 rounded-xl bg-slate-50 dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs text-slate-700 dark:text-slate-300 font-medium border border-slate-200 dark:border-slate-800 transition-colors cursor-pointer"
+                    className="w-full h-11 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-xs text-slate-950 font-bold flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/20 transition-all cursor-pointer"
                   >
-                    Já confirmei / Entrar
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onAuthSuccess(confirmationPendingData.userProfile);
-                      onClose();
-                    }}
-                    className="h-11 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-xs text-slate-950 font-bold flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/20 transition-all cursor-pointer"
-                  >
-                    <span>Acessar Painel</span>
+                    <span>Já confirmei meu e-mail / Entrar com Senha</span>
                     <ArrowRight className="w-3.5 h-3.5" />
                   </button>
                 </div>
