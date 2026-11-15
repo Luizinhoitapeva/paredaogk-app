@@ -372,7 +372,7 @@ export default function App() {
     }
   }, [arenas]);
 
-  // Supabase Realtime: Escuta instantânea nas tabelas notifications, matches e canal de broadcast CajuPay
+  // Supabase Realtime: Escuta instantânea nas tabelas notifications, matches e canal de broadcast Mercado Pago
   useEffect(() => {
     const unsubscribeRealtime = subscribeToRealtimeBookingsAndNotifications({
       onNotification: (notification) => {
@@ -435,7 +435,7 @@ export default function App() {
     };
   }, [currentUser]);
 
-  // Simular evento em tempo real da liquidação do Pix CajuPay (para teste no front-end)
+  // Simular evento em tempo real da liquidação do Pix Mercado Pago (para teste no front-end)
   const handleSimulateRealtimeCall = async () => {
     const sampleCall: MatchBooking = {
       id: `call-pix-${Date.now().toString().slice(-4)}`,
@@ -459,7 +459,7 @@ export default function App() {
       status: 'confirmed',
       createdAt: new Date().toISOString(),
       paymentStatus: 'paid',
-      notes: 'Uniforme Preto ou Amarelo. Chuteira Society. Pagamento Pix já retido em garantia na CajuPay!',
+      notes: 'Uniforme Preto ou Amarelo. Chuteira Society. Pagamento Pix já retido em garantia no Mercado Pago!',
     };
 
     // Disparar broadcast em tempo real com áudio de apito
@@ -1232,7 +1232,7 @@ export default function App() {
         initialRole={currentUser.role}
       />
 
-      {/* Pop-up de Convocação Instantânea via Supabase Realtime (CajuPay Pix Liquidado) */}
+      {/* Pop-up de Convocação Instantânea via Supabase Realtime (Mercado Pago Pix Liquidado) */}
       <GoalkeeperCallAlertModal
         isOpen={isCallAlertOpen}
         onClose={() => setIsCallAlertOpen(false)}

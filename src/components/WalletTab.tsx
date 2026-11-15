@@ -24,12 +24,12 @@ import {
   recordWalletTransactionInSupabase,
   registerAdminWithdrawalRequestLocal,
   isAuthorizedAdmin,
-  generateCajuPayPixCharge,
-  checkCajuPayPaymentStatus,
-  simulateCajuPayWebhookConfirmation,
+  generateMercadoPagoPixCharge,
+  checkMercadoPagoPaymentStatus,
+  simulateMercadoPagoWebhookConfirmation,
   creditWalletDepositInSupabase,
   subscribeToUserWalletRealtime,
-  CajuPayPixChargeResponse,
+  MercadoPagoPixChargeResponse,
 } from '../lib/supabaseClient';
 import { EarningsDashboardSection } from './EarningsDashboardSection';
 import { ReportScope } from '../utils/pdfReportGenerator';
@@ -171,9 +171,9 @@ export const WalletTab: React.FC<WalletTabProps> = ({
   const [withdrawSuccessCode, setWithdrawSuccessCode] = useState<string | null>(null);
   const [withdrawError, setWithdrawError] = useState('');
 
-  // Deposit form state (CajuPay Pix Real Integration)
+  // Deposit form state (Mercado Pago Pix Real Integration)
   const [depositAmount, setDepositAmount] = useState('25.00');
-  const [cajuPixCharge, setCajuPixCharge] = useState<CajuPayPixChargeResponse | null>(null);
+  const [mpPixCharge, setMpPixCharge] = useState<MercadoPagoPixChargeResponse | null>(null);
   const [isGeneratingPix, setIsGeneratingPix] = useState(false);
   const [pixGenerationError, setPixGenerationError] = useState('');
   const [hasCopiedPix, setHasCopiedPix] = useState(false);
@@ -187,19 +187,19 @@ export const WalletTab: React.FC<WalletTabProps> = ({
   const [pixCountdown, setPixCountdown] = useState(900);
   const processedPaymentIdsRef = React.useRef<Set<string>>(new Set());
 
-  const requestCajuPayPix = React.useCallback(
+  const requestMercadoPagoPix = React.useCallback(
     async (amountStr: string) => {
       const numericAmount = parseFloat(amountStr.replace(',', '.'));
       if (isNaN(numericAmount) || numericAmount <= 0) return;
 
       setIsGeneratingPix(true);
       setPixGenerationError('');
-      setCajuPixCharge(null);
+      setMpPixCharge(null);
       setHasCopiedPix(false);
       setDepositSuccessInfo(null);
 
       try {
-        const charge = await generateCajuPayPixCharge({
+        const charge = await generateMercadoPagoPixCharge({
           amount: numericAmount,
           userId: user.id,
           type: 'wallet_deposit',
@@ -211,14 +211,14 @@ export const WalletTab: React.FC<WalletTabProps> = ({
             phone: user.phone,
           },
         });
-        setCajuPixCharge(charge);
+        setMpPixCharge(charge);
         setPixCountdown(900);
       } catch (err: any) {
-        console.warn('[WalletTab CajuPay QR Fallback]', err);
-        setCajuPixCharge(null);
+        console.warn('[WalletTab Mercado Pago QR Fallback]', err);
+        setMpPixCharge(null);
         const detail = err?.message ? ` (${err.message})` : '';
         setPixGenerationError(
-          `Não foi possível gerar o QR Code dinâmico na API do CajuPay no momento${detail}. Você pode tentar novamente ou clicar em "Simular Pagamento Pix Realizado" abaixo para homologação imediata.`
+          `Não foi possível gerar o QR Code dinâmico na API do Mercado Pago no momento${detail}. Você pode tentar novamente ou clicar em "Simular Pagamento Pix Realizado" abaixo para homologação imediata.`
         );
       } finally {
         setIsGeneratingPix(false);
@@ -237,7 +237,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
         paymentId: params.paymentId,
         amount: params.amount,
         receiptCode: params.receiptCode,
-        description: 'Recarga Pix CajuPay Instantânea',
+        description: 'Recarga Pix Mercado Pago Instantânea',
         fallbackCurrentBalance: user.walletBalance,
       });
 
@@ -256,26 +256,26 @@ export const WalletTab: React.FC<WalletTabProps> = ({
     [user.id, user.walletBalance, user.cashbackBalance, onUpdateBalance]
   );
 
-  // Gerar cobrança Pix no CajuPay automaticamente ao abrir o modal
+  // Gerar cobrança Pix no Mercado Pago automaticamente ao abrir o modal
   React.useEffect(() => {
     if (!isDepositModalOpen) return;
-    requestCajuPayPix(depositAmount);
+    requestMercadoPagoPix(depositAmount);
   }, [isDepositModalOpen]);
 
-  // Countdown de expiração do QR Code + Polling de confirmação do webhook /api/webhook-caju
+  // Countdown de expiração do QR Code + Polling de confirmação do pagamento (/v1/payments e /api/webhook-mercadopago)
   React.useEffect(() => {
-    if (!isDepositModalOpen || !cajuPixCharge || depositSuccessInfo) return;
+    if (!isDepositModalOpen || !mpPixCharge || depositSuccessInfo) return;
 
     const timer = setInterval(() => {
       setPixCountdown((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
 
     const poller = setInterval(async () => {
-      const statusRes = await checkCajuPayPaymentStatus(cajuPixCharge.id);
+      const statusRes = await checkMercadoPagoPaymentStatus(mpPixCharge.id);
       if (statusRes.status === 'completed') {
         await finalizeConfirmedPixDeposit({
-          paymentId: cajuPixCharge.id,
-          amount: cajuPixCharge.amount,
+          paymentId: mpPixCharge.id,
+          amount: mpPixCharge.amount,
           receiptCode: statusRes.receiptCode || generateReceiptCode(),
         });
       }
@@ -285,7 +285,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
       clearInterval(timer);
       clearInterval(poller);
     };
-  }, [isDepositModalOpen, cajuPixCharge, depositSuccessInfo, finalizeConfirmedPixDeposit]);
+  }, [isDepositModalOpen, mpPixCharge, depositSuccessInfo, finalizeConfirmedPixDeposit]);
 
   // Handle Withdraw submission
   const handleWithdrawSubmit = (e: React.FormEvent) => {
@@ -312,13 +312,13 @@ export const WalletTab: React.FC<WalletTabProps> = ({
         id: `tx-${Date.now()}`,
         type: 'pix_out',
         amount: -amountNum,
-        description: `Saque Pix CajuPay (${pixKeyType.toUpperCase()})`,
+        description: `Saque Pix Mercado Pago (${pixKeyType.toUpperCase()})`,
         date: new Date().toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }),
         status: 'processing',
         pixKey: pixKey,
         pixKeyType: pixKeyType,
         receiptCode: code,
-        provider: 'cajupay',
+        provider: 'mercadopago',
       };
 
       setTransactions((prev) => [newTx, ...prev]);
@@ -344,7 +344,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
     setIsConfirmingDeposit(true);
     setPixGenerationError('');
 
-    const activeChargeId = cajuPixCharge?.id || `caju_homolog_${Date.now()}`;
+    const activeChargeId = mpPixCharge?.id || `mp_homolog_${Date.now()}`;
 
     try {
       let resolvedPaymentId = activeChargeId;
@@ -352,7 +352,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
       let resolvedReceiptCode = generateReceiptCode();
 
       try {
-        const simResult = await simulateCajuPayWebhookConfirmation({
+        const simResult = await simulateMercadoPagoWebhookConfirmation({
           paymentId: activeChargeId,
           amount: amountNum,
           userId: user.id,
@@ -382,8 +382,8 @@ export const WalletTab: React.FC<WalletTabProps> = ({
   };
 
   const copyPixCode = () => {
-    if (!cajuPixCharge?.qrCodeText) return;
-    navigator.clipboard?.writeText(cajuPixCharge.qrCodeText);
+    if (!mpPixCharge?.qrCodeText) return;
+    navigator.clipboard?.writeText(mpPixCharge.qrCodeText);
     setHasCopiedPix(true);
     setTimeout(() => setHasCopiedPix(false), 2000);
   };
@@ -413,7 +413,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
             <div>
               <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
                 <Wallet className="w-4 h-4 text-emerald-600 dark:text-[#22c55e]" />
-                <span>Carteira Digital CajuPay · ParedãoGK</span>
+                <span>Carteira Digital Mercado Pago · ParedãoGK</span>
               </div>
               <div className="font-mono tabular-nums text-3xl sm:text-4xl font-extrabold text-slate-900 dark:text-white tracking-tight">
                 {formatCurrency(user.walletBalance)}
@@ -469,7 +469,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
               </div>
               <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
               <div>
-                <span className="text-slate-500 dark:text-slate-400">Custódia CajuPay: </span>
+                <span className="text-slate-500 dark:text-slate-400">Custódia Mercado Pago: </span>
                 <span className="font-mono tabular-nums font-bold text-sky-600 dark:text-[#38bdf8]">
                   {formatCurrency(dashboardSummary.pendingCustodyBalance)}
                 </span>
@@ -504,7 +504,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
         </div>
       </div>
 
-      {/* Seção 1: Dashboard de Ganhos (Gráficos Recharts, Custódia e Saques Pix CajuPay) */}
+      {/* Seção 1: Dashboard de Ganhos (Gráficos Recharts, Custódia e Saques Pix Mercado Pago) */}
       {activeWalletView === 'earnings' && (
         <EarningsDashboardSection
           user={user}
@@ -541,7 +541,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
             <div className="flex items-center gap-2.5">
               <ShieldCheck className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
               <span>
-                <strong>Pix Instantâneo 24/7 via CajuPay:</strong> Saques e depósitos processados sem taxa bancária.
+                <strong>Pix Instantâneo 24/7 via Mercado Pago:</strong> Saques e depósitos processados sem taxa bancária.
               </span>
             </div>
             <span className="font-mono font-bold text-[11px] text-emerald-700 dark:text-emerald-400 hidden sm:inline">
@@ -575,7 +575,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                 className="px-3 py-1.5 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 dark:border-[#38bdf8]/40 text-sky-700 dark:text-[#38bdf8] text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
               >
                 <FileText className="w-3.5 h-3.5" />
-                <span>Exportar PDF CajuPay</span>
+                <span>Exportar PDF Mercado Pago</span>
               </button>
             )}
 
@@ -708,7 +708,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                 </div>
                 <h4 className="font-bold text-lg text-slate-900 dark:text-white">Solicitação de Saque Enviada!</h4>
                 <p className="text-xs text-slate-600 dark:text-slate-300">
-                  Seu pedido foi registrado na fila CajuPay e está aguardando autorização e emissão do comprovante administrativo.
+                  Seu pedido foi registrado na fila Mercado Pago e está aguardando autorização e emissão do comprovante administrativo.
                 </p>
                 <div className="p-3 rounded-xl bg-slate-100 dark:bg-slate-950 font-mono text-xs text-emerald-700 dark:text-emerald-400">
                   Comprovante: {withdrawSuccessCode}
@@ -821,7 +821,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
         </div>
       )}
 
-      {/* Deposit Modal (CajuPay Pix Dinâmico + Copia e Cola + Persistência Supabase) */}
+      {/* Deposit Modal (Mercado Pago Pix Dinâmico + Copia e Cola + Persistência Supabase) */}
       {isDepositModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
           <motion.div
@@ -854,7 +854,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                 </div>
                 <div>
                   <h4 className="font-bold text-lg text-slate-900 dark:text-white">
-                    Pix CajuPay Confirmado!
+                    Pix Mercado Pago Confirmado!
                   </h4>
                   <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
                     Crédito de{' '}
@@ -890,7 +890,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
             ) : (
               <>
                 <p className="text-xs text-slate-600 dark:text-slate-400">
-                  Escolha o valor para gerar seu QR Code Pix dinâmico via CajuPay:
+                  Escolha o valor para gerar seu QR Code Pix dinâmico via Mercado Pago:
                 </p>
 
                 <div className="grid grid-cols-4 gap-2">
@@ -901,7 +901,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                       disabled={isGeneratingPix || isConfirmingDeposit}
                       onClick={() => {
                         setDepositAmount(val);
-                        requestCajuPayPix(val);
+                        requestMercadoPagoPix(val);
                       }}
                       className={`py-2 text-xs rounded-xl border font-mono transition-all cursor-pointer disabled:opacity-60 ${
                         depositAmount === val
@@ -922,7 +922,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                     </div>
                     <button
                       type="button"
-                      onClick={() => requestCajuPayPix(depositAmount)}
+                      onClick={() => requestMercadoPagoPix(depositAmount)}
                       className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-200 font-bold shrink-0 cursor-pointer transition-colors"
                     >
                       Tentar novamente
@@ -931,13 +931,13 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                 )}
 
                 {/* Provider & Expiration Strip */}
-                {cajuPixCharge && (
+                {mpPixCharge && (
                   <div className="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-between text-[11px]">
                     <span className="font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
                       <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-[#22c55e]" />
-                      {cajuPixCharge.provider === 'cajupay'
-                        ? 'CajuPay API Oficial'
-                        : 'CajuPay Pix EMV (Homologação)'}
+                      {mpPixCharge.provider === 'mercadopago'
+                        ? 'Mercado Pago API Oficial'
+                        : 'Mercado Pago Pix EMV (Homologação)'}
                     </span>
                     <span className="font-mono font-bold text-emerald-700 dark:text-[#22c55e]">
                       {formatCountdown(pixCountdown)}
@@ -950,12 +950,12 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                   {isGeneratingPix ? (
                     <div className="flex flex-col items-center gap-2 text-slate-600">
                       <div className="w-7 h-7 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-                      <span className="text-[11px] font-mono font-semibold">Gerando Pix CajuPay...</span>
+                      <span className="text-[11px] font-mono font-semibold">Gerando Pix Mercado Pago...</span>
                     </div>
-                  ) : cajuPixCharge?.qrCodeBase64 ? (
+                  ) : mpPixCharge?.qrCodeBase64 ? (
                     <img
-                      src={cajuPixCharge.qrCodeBase64}
-                      alt={`QR Code Pix CajuPay R$ ${depositAmount}`}
+                      src={mpPixCharge.qrCodeBase64}
+                      alt={`QR Code Pix Mercado Pago R$ ${depositAmount}`}
                       className="w-full h-full object-contain"
                     />
                   ) : pixGenerationError ? (
@@ -982,11 +982,11 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                   <div className="truncate text-slate-600 dark:text-slate-400 text-[11px] font-mono select-all flex-1">
                     {isGeneratingPix
                       ? 'Gerando código Pix Copia e Cola...'
-                      : cajuPixCharge?.qrCodeText || 'Modo homologação ativo (sem QR externo)'}
+                      : mpPixCharge?.qrCodeText || 'Modo homologação ativo (sem QR externo)'}
                   </div>
                   <button
                     type="button"
-                    disabled={isGeneratingPix || !cajuPixCharge?.qrCodeText}
+                    disabled={isGeneratingPix || !mpPixCharge?.qrCodeText}
                     onClick={copyPixCode}
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 shrink-0 transition-colors cursor-pointer disabled:opacity-50 ${
                       hasCopiedPix
@@ -999,10 +999,10 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                   </button>
                 </div>
 
-                {cajuPixCharge && (
+                {mpPixCharge && (
                   <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-ping" />
-                    <span>Aguardando confirmação automática do webhook CajuPay...</span>
+                    <span>Aguardando confirmação automática do webhook Mercado Pago...</span>
                   </div>
                 )}
 

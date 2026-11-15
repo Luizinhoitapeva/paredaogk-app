@@ -117,12 +117,12 @@ Em caso de ausência injustificada (W.O.):
     },
     {
       title: '2. Tabela Oficial de Cachês (Itapeva-SP) e Taxa Fixa da Casa',
-      content: `O modelo regional de Itapeva (SP) utiliza 3 faixas fixas de convocação com taxa fixa única da casa de R$ 5,00 por partida para manutenção da custódia segura CajuPay e seguro atleta:
+      content: `O modelo regional de Itapeva (SP) utiliza 3 faixas fixas de convocação com taxa fixa única da casa de R$ 5,00 por partida para manutenção da custódia segura Mercado Pago e seguro atleta:
 - Faixa 1 (Iniciante | Nota média < 4.8): R$ 20,00 total (R$ 15,00 para o goleiro + R$ 5,00 taxa da casa);
 - Faixa 2 (Intermediário | Nota média entre 4.8 e 4.9): R$ 25,00 total (R$ 20,00 para o goleiro + R$ 5,00 taxa da casa);
 - Faixa 3 (Elite / Avançado | Nota média acima de 4.9): R$ 30,00 total (R$ 25,00 para o goleiro + R$ 5,00 taxa da casa).
 
-O contratante realiza o pagamento antecipado via Pix CajuPay. O repasse líquido do goleiro é liberado para saque instantâneo após o término do jogo.`
+O contratante realiza o pagamento antecipado via Pix Mercado Pago. O repasse líquido do goleiro é liberado para saque instantâneo após o término do jogo.`
     },
     {
       title: '3. Seguro Atleta & Parceria ArenaDraft',
@@ -138,7 +138,7 @@ O contratante realiza o pagamento antecipado via Pix CajuPay. O repasse líquido
     },
     {
       title: '6. Suporte Oficial, Atendimento e Contato',
-      content: `Para resolução de litígios, dúvidas sobre pagamentos Pix via CajuPay ou orientações contratuais, entre em contato diretamente com nossa equipe oficial:\n• E-mail: paredaogkbr@gmail.com\n• Plantão WhatsApp 24h: (15) 98159-6443`
+      content: `Para resolução de litígios, dúvidas sobre pagamentos Pix via Mercado Pago ou orientações contratuais, entre em contato diretamente com nossa equipe oficial:\n• E-mail: paredaogkbr@gmail.com\n• Plantão WhatsApp 24h: (15) 98159-6443`
     }
   ]
 };

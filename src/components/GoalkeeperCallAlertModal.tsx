@@ -86,7 +86,7 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
                       ? `ALERTA SOS · +R$ ${booking.sosBonus || 5} BÔNUS URGÊNCIA`
                       : booking.isWeeklyRecurrence
                       ? 'RECONVOCAÇÃO SEMANAL PRIORITÁRIA'
-                      : 'SUPABASE REALTIME · CAJUPAY PIX'}
+                      : 'SUPABASE REALTIME · MERCADO PAGO PIX'}
                   </span>
                 </div>
                 <h2 className="font-display font-extrabold text-lg text-slate-900 dark:text-white mt-1 tracking-tight">
@@ -145,7 +145,7 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
                 <Zap className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
                 Custódia Instantânea
               </span>
-              <div className="text-[10px] text-slate-500 mt-1">CajuPay Gateway</div>
+              <div className="text-[10px] text-slate-500 mt-1">Mercado Pago Gateway</div>
             </div>
           </div>
 

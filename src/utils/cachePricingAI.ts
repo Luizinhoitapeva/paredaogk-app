@@ -190,13 +190,13 @@ export function calculateSmartCacheEstimate(input: CacheSuggestionInput): CacheS
       ? ` (nota média ${input.rating.toFixed(2)}★ e ${input.matchesPlayed ?? 0} jogos)`
       : '';
 
-  const rationale = `${chosenTier.label} selecionada para ${input.modality} a ${clampedKm} km (${urgencyLabel})${ratingContext}: total de R$ ${chosenTier.totalPrice},00 via Pix CajuPay, sendo R$ ${chosenTier.goalkeeperNet},00 líquido para o goleiro e R$ ${ITAPEVA_HOUSE_FEE},00 de taxa fixa da casa.`;
+  const rationale = `${chosenTier.label} selecionada para ${input.modality} a ${clampedKm} km (${urgencyLabel})${ratingContext}: total de R$ ${chosenTier.totalPrice},00 via Pix Mercado Pago, sendo R$ ${chosenTier.goalkeeperNet},00 líquido para o goleiro e R$ ${ITAPEVA_HOUSE_FEE},00 de taxa fixa da casa.`;
 
   const tips = [
     `Tabela oficial Itapeva (SP): Faixa 1 R$ 20 (<4.8★) · Faixa 2 R$ 25 (4.8–4.9★) · Faixa 3 R$ 30 (>4.9★).`,
     input.urgency === 'sos_urgent'
       ? 'Chamadas SOS priorizam goleiros próximos com repasse integral sem alteração na taxa fixa de R$ 5,00.'
-      : `Taxa fixa única de R$ ${ITAPEVA_HOUSE_FEE},00 da plataforma garante custódia CajuPay e seguro atleta.`,
+      : `Taxa fixa única de R$ ${ITAPEVA_HOUSE_FEE},00 da plataforma garante custódia Mercado Pago e seguro atleta.`,
   ];
 
   return {

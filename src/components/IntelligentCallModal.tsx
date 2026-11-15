@@ -33,7 +33,7 @@ import {
   getTierByTotalPrice,
 } from '../utils/cachePricingAI';
 
-interface CajuPixResponse {
+interface MercadoPagoPixResponse {
   id: string;
   status: string;
   amount: number;
@@ -67,7 +67,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
   approvedArenas = [],
   onOpenAuth,
 }) => {
-  const [step, setStep] = useState<'configure' | 'scanning' | 'matched' | 'no_goalkeepers' | 'cajupay_pix'>('configure');
+  const [step, setStep] = useState<'configure' | 'scanning' | 'matched' | 'no_goalkeepers' | 'mercadopago_pix'>('configure');
   const [modality, setModality] = useState<ModalityType>('Society');
   const [date, setDate] = useState('Hoje, 20:30');
   const [arenaName, setArenaName] = useState(
@@ -82,9 +82,9 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
   const [matchedGk, setMatchedGk] = useState<Goalkeeper | null>(null);
   const [onlineCount, setOnlineCount] = useState<number>(0);
 
-  // CajuPay Pix States
+  // Mercado Pago Pix States
   const [isGeneratingPix, setIsGeneratingPix] = useState(false);
-  const [cajuPixData, setCajuPixData] = useState<CajuPixResponse | null>(null);
+  const [mpPixData, setMpPixData] = useState<MercadoPagoPixResponse | null>(null);
   const [hasCopiedPix, setHasCopiedPix] = useState(false);
   const [pixError, setPixError] = useState('');
   const [countdownSeconds, setCountdownSeconds] = useState(900); // 15 minutos
@@ -137,7 +137,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
   // Countdown timer for Pix expiration
   useEffect(() => {
     let timer: NodeJS.Timeout;
-    if (step === 'cajupay_pix' && countdownSeconds > 0) {
+    if (step === 'mercadopago_pix' && countdownSeconds > 0) {
       timer = setInterval(() => {
         setCountdownSeconds((prev) => (prev > 0 ? prev - 1 : 0));
       }, 1000);
@@ -202,8 +202,8 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
     }, waitMs);
   };
 
-  // Disparar geração de cobrança Pix na API CajuPay
-  const handleGenerateCajuPayPix = async () => {
+  // Disparar geração de cobrança Pix na API Mercado Pago
+  const handleGenerateMercadoPagoPix = async () => {
     if (!matchedGk) return;
 
     setIsGeneratingPix(true);
@@ -211,14 +211,22 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
 
     try {
       const matchId = `mtch-${Date.now()}`;
-      const response = await fetch('/api/gerar-pix-caju', {
+      const publicKey = import.meta.env.VITE_MERCADOPAGO_PUBLIC_KEY || '';
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (publicKey && !publicKey.startsWith('MY_') && !publicKey.includes('placeholder')) {
+        headers['X-MercadoPago-Public-Key'] = publicKey;
+      }
+
+      const response = await fetch('/api/gerar-pix-mercadopago', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({
           amount: price,
           valor: price,
+          userId: user?.id && user.id !== 'usr-guest' ? user.id : undefined,
+          type: 'match_booking',
           description: `Convocação GK ${matchedGk.name} - ${arenaName}`,
           matchId: matchId,
           customer: {
@@ -230,30 +238,30 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
         }),
       });
 
-      const parsed = await safeParseJsonResponse<CajuPixResponse & { success?: boolean; error?: string }>(
+      const parsed = await safeParseJsonResponse<MercadoPagoPixResponse & { success?: boolean; error?: string }>(
         response,
-        'API CajuPay Pix'
+        'API Mercado Pago Pix'
       );
 
       if (!parsed.valid || !parsed.data) {
         throw new Error(
           parsed.errorMessage ||
-            'A API do CajuPay retornou resposta vazia ou inválida ao gerar o Pix.'
+            'A API do Mercado Pago retornou resposta vazia ou inválida ao gerar o Pix.'
         );
       }
 
       const data = parsed.data;
       if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Falha ao comunicar com a API do CajuPay.');
+        throw new Error(data.error || 'Falha ao comunicar com a API do Mercado Pago.');
       }
 
-      setCajuPixData(data);
+      setMpPixData(data);
       setCountdownSeconds(900);
-      setStep('cajupay_pix');
+      setStep('mercadopago_pix');
     } catch (err: any) {
-      console.warn('[CajuPay Pix Request Fallback]', err);
+      console.warn('[Mercado Pago Pix Request Fallback]', err);
       setPixError(
-        `${err?.message || 'Erro ao comunicar com a API Pix CajuPay.'} Você pode tentar novamente ou confirmar em modo de homologação.`
+        `${err?.message || 'Erro ao comunicar com a API Pix Mercado Pago.'} Você pode tentar novamente ou confirmar em modo de homologação.`
       );
     } finally {
       setIsGeneratingPix(false);
@@ -261,8 +269,8 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
   };
 
   const handleCopyPixCode = () => {
-    if (!cajuPixData?.qrCodeText) return;
-    navigator.clipboard?.writeText(cajuPixData.qrCodeText);
+    if (!mpPixData?.qrCodeText) return;
+    navigator.clipboard?.writeText(mpPixData.qrCodeText);
     setHasCopiedPix(true);
     setTimeout(() => setHasCopiedPix(false), 2200);
   };
@@ -276,7 +284,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
       const feeSplit = getGoalkeeperNetAndFee(price);
       const cashback = Number((price * 0.1).toFixed(2));
       const newBooking: MatchBooking = {
-        id: cajuPixData?.id || `mtch-${Date.now()}`,
+        id: mpPixData?.id || `mtch-${Date.now()}`,
         organizerId: user?.id || 'usr-current',
         organizerName: user?.name || 'ParedãoGK Oficial',
         goalkeeperId: matchedGk.id,
@@ -328,7 +336,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
         <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-slate-950/60">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-600 dark:text-emerald-400">
-              {step === 'cajupay_pix' ? (
+              {step === 'mercadopago_pix' ? (
                 <QrCode className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
               ) : (
                 <GkGloveBallIcon className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
@@ -336,13 +344,13 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
             </div>
             <div>
               <h2 className="font-display font-bold text-base text-slate-900 dark:text-white flex items-center gap-2 flex-wrap">
-                {step === 'cajupay_pix' ? 'Pagamento Pix CajuPay' : 'Convocação Inteligente de GK'}
+                {step === 'mercadopago_pix' ? 'Pagamento Pix Mercado Pago' : 'Convocação Inteligente de GK'}
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30">
-                  {step === 'cajupay_pix' ? 'CajuPay Oficial' : 'Radar Ativo'}
+                  {step === 'mercadopago_pix' ? 'Mercado Pago Oficial' : 'Radar Ativo'}
                 </span>
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                {step === 'cajupay_pix'
+                {step === 'mercadopago_pix'
                   ? 'Custódia garantida com liquidação instantânea'
                   : 'Matchmaking instantâneo de goleiros por proximidade e nível'}
               </p>
@@ -660,7 +668,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
           </div>
         )}
 
-        {/* STEP 3: MATCHED - READY TO PAY WITH CAJUPAY */}
+        {/* STEP 3: MATCHED - READY TO PAY WITH MERCADO PAGO */}
         {step === 'matched' && matchedGk && (
           <div className="p-6 space-y-5">
             <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center gap-3">
@@ -763,7 +771,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
               </div>
             )}
 
-            {/* Actions: Disparar CajuPay Pix */}
+            {/* Actions: Disparar Mercado Pago Pix */}
             <div className="flex items-center gap-3">
               <button
                 type="button"
@@ -775,18 +783,18 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
               <button
                 type="button"
                 disabled={isGeneratingPix}
-                onClick={handleGenerateCajuPayPix}
+                onClick={handleGenerateMercadoPagoPix}
                 className="flex-1 h-12 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 active:scale-[0.99] text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
               >
                 {isGeneratingPix ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Conectando com CajuPay Pix...</span>
+                    <span>Conectando com Mercado Pago Pix...</span>
                   </>
                 ) : (
                   <>
                     <QrCode className="w-4 h-4" />
-                    <span>Pagar com Pix via CajuPay ({formatCurrency(price)})</span>
+                    <span>Pagar com Pix via Mercado Pago ({formatCurrency(price)})</span>
                   </>
                 )}
               </button>
@@ -794,14 +802,14 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
           </div>
         )}
 
-        {/* STEP 4: CAJUPAY PIX MODAL (QR CODE + COPIA E COLA) */}
-        {step === 'cajupay_pix' && cajuPixData && (
+        {/* STEP 4: MERCADO PAGO PIX MODAL (QR CODE + COPIA E COLA) */}
+        {step === 'mercadopago_pix' && mpPixData && (
           <div className="p-6 space-y-4 max-h-[75vh] overflow-y-auto text-center">
             {/* Header info */}
             <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-between text-xs text-emerald-700 dark:text-emerald-300">
               <span className="flex items-center gap-1.5 font-semibold">
                 <Shield className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                Custódia Protegida CajuPay
+                Custódia Protegida Mercado Pago
               </span>
               <span className="font-mono text-emerald-600 dark:text-emerald-400 font-bold">
                 Expira em {formatCountdown(countdownSeconds)}
@@ -812,16 +820,16 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
             <div>
               <span className="text-[11px] text-slate-500 dark:text-slate-400 block">Total a pagar da convocação:</span>
               <span className="font-mono text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white">
-                {formatCurrency(cajuPixData.amount || price)}
+                {formatCurrency(mpPixData.amount || price)}
               </span>
             </div>
 
             {/* QR Code Container */}
             <div className="p-4 rounded-2xl bg-white w-52 h-52 mx-auto flex items-center justify-center shadow-2xl relative border-2 border-slate-200 dark:border-slate-800">
-              {cajuPixData.qrCodeBase64 ? (
+              {mpPixData.qrCodeBase64 ? (
                 <img
-                  src={cajuPixData.qrCodeBase64}
-                  alt="QR Code Pix CajuPay"
+                  src={mpPixData.qrCodeBase64}
+                  alt="QR Code Pix Mercado Pago"
                   className="w-full h-full object-contain"
                 />
               ) : (
@@ -832,7 +840,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
                     <div className="w-9 h-9 bg-black rounded" />
                   </div>
                   <div className="text-center font-mono font-bold text-[10px] text-black uppercase tracking-tight">
-                    PIX CAJUPAY<br />PAREDÃOGK
+                    PIX MERCADO PAGO<br />PAREDÃOGK
                   </div>
                   <div className="flex justify-between">
                     <div className="w-9 h-9 bg-black rounded" />
@@ -850,7 +858,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
             {/* Pix Copia e Cola with 1-click button */}
             <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center justify-between text-left gap-2">
               <div className="truncate text-slate-600 dark:text-slate-400 text-[11px] font-mono select-all flex-1">
-                {cajuPixData.qrCodeText}
+                {mpPixData.qrCodeText}
               </div>
               <button
                 type="button"
@@ -869,7 +877,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
             {/* Status pulse */}
             <div className="flex items-center justify-center gap-2 text-xs text-slate-500 dark:text-slate-400 py-1">
               <span className="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-ping" />
-              <span>Aguardando webhook de confirmação do CajuPay...</span>
+              <span>Aguardando webhook de confirmação do Mercado Pago...</span>
             </div>
 
             {/* Action buttons */}

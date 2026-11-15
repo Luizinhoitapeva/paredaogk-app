@@ -11,7 +11,7 @@ export interface IconProps extends React.SVGProps<SVGSVGElement> {
  * PAREDÃOGK CUSTOM VECTOR ICON DESIGN SYSTEM
  * 
  * Precision geometric vector icons crafted specifically for goalkeeper performance,
- * soccer matchmaking, CajuPay Pix finances, and dark mode (#020617 / #22c55e / #38bdf8).
+ * soccer matchmaking, Mercado Pago Pix finances, and dark mode (#020617 / #22c55e / #38bdf8).
  */
 
 // ==========================================
@@ -271,7 +271,7 @@ export const GkBellIcon: React.FC<IconProps> = ({
 );
 
 /**
- * GkWalletPixIcon: Carteira Digital & Pix CajuPay
+ * GkWalletPixIcon: Carteira Digital & Pix Mercado Pago
  * Carteira atlética com chave Pix geométrica integrada em destaque.
  */
 export const GkWalletPixIcon: React.FC<IconProps> = ({
@@ -304,7 +304,7 @@ export const GkWalletPixIcon: React.FC<IconProps> = ({
 );
 
 /**
- * GkCoinPixIcon: Moeda CajuPay Pix / Ganhos
+ * GkCoinPixIcon: Moeda Mercado Pago Pix / Ganhos
  * Destaque financeiro com símbolo monetário e raio de liquidação instantânea.
  */
 export const GkCoinPixIcon: React.FC<IconProps> = ({

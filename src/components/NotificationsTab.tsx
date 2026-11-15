@@ -138,7 +138,7 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({ userId, onNa
                 : 'Nenhuma notificação nesta categoria'}
             </p>
             <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-              Convocações confirmadas via CajuPay Pix, alertas SOS de substituição relâmpago e atualizações das arenas de Itapeva aparecerão aqui em tempo real.
+              Convocações confirmadas via Mercado Pago Pix, alertas SOS de substituição relâmpago e atualizações das arenas de Itapeva aparecerão aqui em tempo real.
             </p>
           </div>
         ) : (

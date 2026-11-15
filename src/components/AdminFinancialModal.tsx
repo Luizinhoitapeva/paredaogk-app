@@ -18,19 +18,19 @@ import {
 import {
   AdminPixWithdrawal,
   AdminPixWithdrawalStatus,
-  CajuPayWebhookConfig,
-  CajuPayWebhookEventType,
-  CajuPayWebhookLog,
+  MercadoPagoWebhookConfig,
+  MercadoPagoWebhookEventType,
+  MercadoPagoWebhookLog,
   UserProfile,
 } from '../types';
 import { formatCurrency } from '../utils/validations';
 import {
-  dispatchCajuPayWebhookTest,
+  dispatchMercadoPagoWebhookTest,
   fetchAdminPixWithdrawalsFromSupabase,
-  fetchCajuPayWebhookConfigAndLogs,
+  fetchMercadoPagoWebhookConfigAndLogs,
   isAuthorizedAdmin,
   processAdminPixWithdrawalInSupabase,
-  saveCajuPayWebhookConfig,
+  saveMercadoPagoWebhookConfig,
   subscribeToAdminFinancialRealtime,
 } from '../lib/supabaseClient';
 import { Skeleton } from './SkeletonLoading';
@@ -45,7 +45,7 @@ interface AdminFinancialModalProps {
 }
 
 const WEBHOOK_EVENT_OPTIONS: {
-  id: CajuPayWebhookEventType;
+  id: MercadoPagoWebhookEventType;
   label: string;
   description: string;
 }[] = [
@@ -62,7 +62,7 @@ const WEBHOOK_EVENT_OPTIONS: {
   {
     id: 'withdrawal.processed',
     label: 'withdrawal.processed',
-    description: 'Saque Pix liquidado pelo Banco Central via CajuPay',
+    description: 'Saque Pix liquidado pelo Banco Central via Mercado Pago',
   },
   {
     id: 'withdrawal.rejected',
@@ -97,12 +97,12 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
   // Webhooks state
   const defaultWebhookEndpoint =
     typeof window !== 'undefined'
-      ? `${window.location.origin}/api/webhook-caju`
-      : 'https://paredaogk.app/api/webhook-caju';
-  const [webhookConfig, setWebhookConfig] = useState<CajuPayWebhookConfig>({
-    id: 'cajupay-webhook-default',
+      ? `${window.location.origin}/api/webhook-mercadopago`
+      : 'https://paredaogk.app/api/webhook-mercadopago';
+  const [webhookConfig, setWebhookConfig] = useState<MercadoPagoWebhookConfig>({
+    id: 'mercadopago-webhook-default',
     webhookUrl: defaultWebhookEndpoint,
-    signingSecret: 'cwhsec_555f1354b2a2851360c50f9bccb3dc9a2d76d7aab72bd82d',
+    signingSecret: 'mpwhsec_paredaogk_itapeva_2026',
     isActive: true,
     subscribedEvents: [
       'payment.confirmed',
@@ -112,12 +112,12 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
     ],
     updatedAt: new Date().toISOString(),
   });
-  const [webhookLogs, setWebhookLogs] = useState<CajuPayWebhookLog[]>([]);
+  const [webhookLogs, setWebhookLogs] = useState<MercadoPagoWebhookLog[]>([]);
   const [isLoadingWebhooks, setIsLoadingWebhooks] = useState(false);
   const [isSavingWebhook, setIsSavingWebhook] = useState(false);
   const [isDispatchingTest, setIsDispatchingTest] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
-  const [testEvent, setTestEvent] = useState<CajuPayWebhookEventType>('payment.confirmed');
+  const [testEvent, setTestEvent] = useState<MercadoPagoWebhookEventType>('payment.confirmed');
   const [testAmount, setTestAmount] = useState<20 | 25 | 30>(25);
   const [simulateInvalidSig, setSimulateInvalidSig] = useState(false);
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
@@ -142,7 +142,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
     if (!isAuthorizedAdmin(user)) return;
     setIsLoadingWebhooks(true);
     try {
-      const res = await fetchCajuPayWebhookConfigAndLogs(defaultWebhookEndpoint);
+      const res = await fetchMercadoPagoWebhookConfigAndLogs(defaultWebhookEndpoint);
       setWebhookConfig(res.config);
       setWebhookLogs(res.logs);
     } finally {
@@ -253,7 +253,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
     );
   };
 
-  const handleToggleEventSubscription = (eventId: CajuPayWebhookEventType) => {
+  const handleToggleEventSubscription = (eventId: MercadoPagoWebhookEventType) => {
     setWebhookConfig((prev) => {
       const exists = prev.subscribedEvents.includes(eventId);
       const nextEvents = exists
@@ -271,7 +271,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
     }
     setWebhookConfig((prev) => ({
       ...prev,
-      signingSecret: `cwhsec_${randomHex}`,
+      signingSecret: `mpwhsec_${randomHex}`,
     }));
     setShowSecret(true);
   };
@@ -281,7 +281,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
     setIsSavingWebhook(true);
     setActionBanner(null);
 
-    const { config: saved, syncedToSupabase } = await saveCajuPayWebhookConfig({
+    const { config: saved, syncedToSupabase } = await saveMercadoPagoWebhookConfig({
       config: webhookConfig,
       adminEmail: user.email || 'admin@paredaogk.com.br',
     });
@@ -289,7 +289,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
     setWebhookConfig(saved);
     setIsSavingWebhook(false);
     setActionBanner(
-      `Configuração de Webhook CajuPay salva (${saved.isActive ? 'Endpoint Ativo' : 'Pausado'})${
+      `Configuração de Webhook Mercado Pago salva (${saved.isActive ? 'Endpoint Ativo' : 'Pausado'})${
         syncedToSupabase ? ' · Persistida no Supabase.' : ' · Aplicada no servidor.'
       }`
     );
@@ -299,7 +299,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
     setIsDispatchingTest(true);
     setActionBanner(null);
 
-    const { log, syncedToSupabase } = await dispatchCajuPayWebhookTest({
+    const { log, syncedToSupabase } = await dispatchMercadoPagoWebhookTest({
       event: testEvent,
       webhookUrl: webhookConfig.webhookUrl,
       simulateInvalidSignature: simulateInvalidSig,
@@ -344,7 +344,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
                 </div>
                 <div className="min-w-0">
                   <h2 className="font-display font-extrabold text-base sm:text-lg text-slate-900 dark:text-white truncate">
-                    Gestão Financeira CajuPay
+                    Gestão Financeira Mercado Pago
                   </h2>
                   <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                     <span>Administração de Saques Pix & Webhooks</span>
@@ -393,7 +393,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
                     }`}
                   >
                     <Webhook className="w-4 h-4" />
-                    <span>Webhooks CajuPay ({webhookLogs.length})</span>
+                    <span>Webhooks Mercado Pago ({webhookLogs.length})</span>
                   </button>
                 </div>
 
@@ -700,7 +700,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
                                     type="text"
                                     value={receiptDraft}
                                     onChange={(e) => setReceiptDraft(e.target.value)}
-                                    placeholder="Código EndToEnd / Comprovante CajuPay (ex: E004169682026...)"
+                                    placeholder="Código EndToEnd / Comprovante Mercado Pago (ex: E004169682026...)"
                                     className="flex-1 h-10 px-3 rounded-xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-700 font-mono text-xs text-slate-900 dark:text-white focus:border-[#38bdf8] focus:outline-none"
                                   />
                                   <div className="flex items-center gap-2">
@@ -768,7 +768,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
                     )}
                   </>
                 ) : (
-                  /* TAB 2: WEBHOOKS CAJUPAY + HMAC-SHA256 */
+                  /* TAB 2: WEBHOOKS MERCADO PAGO + HMAC-SHA256 */
                   <div className="space-y-6">
                     {/* Config & Test Split Grid */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch">
@@ -788,7 +788,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
                                   Endpoint & Assinatura HMAC-SHA256
                                 </h3>
                                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                                  Validação criptográfica do cabeçalho X-CajuPay-Signature
+                                  Validação criptográfica do cabeçalho x-signature (Mercado Pago)
                                 </p>
                               </div>
                             </div>
@@ -810,7 +810,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
 
                           <div>
                             <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                              URL do Webhook CajuPay
+                              URL do Webhook Mercado Pago
                             </label>
                             <div className="flex gap-2">
                               <input
@@ -948,7 +948,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
                             <select
                               value={testEvent}
                               onChange={(e) =>
-                                setTestEvent(e.target.value as CajuPayWebhookEventType)
+                                setTestEvent(e.target.value as MercadoPagoWebhookEventType)
                               }
                               className="w-full h-10 px-3 rounded-xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 font-mono text-xs text-slate-900 dark:text-white focus:border-[#38bdf8] focus:outline-none"
                             >
@@ -1040,7 +1040,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
                             Log em Tempo Real de Eventos Recebidos
                           </h3>
                           <p className="text-xs text-slate-500 dark:text-slate-400">
-                            Histórico auditável de callbacks CajuPay e disparos de validação HMAC
+                            Histórico auditável de callbacks Mercado Pago e disparos de validação HMAC
                           </p>
                         </div>
                         <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
@@ -1128,7 +1128,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
                                 {isExpanded && (
                                   <div className="px-4 pb-4 pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2.5 text-xs">
                                     <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                                      <span>X-CajuPay-Signature:</span>
+                                      <span>Assinatura HMAC / x-signature:</span>
                                       <code className="break-all text-sky-700 dark:text-[#38bdf8]">
                                         {log.signatureHeader}
                                       </code>

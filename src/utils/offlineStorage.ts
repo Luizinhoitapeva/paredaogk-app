@@ -10,8 +10,8 @@ import {
   WeeklyMatchTemplate,
   ArenaField,
   AdminPixWithdrawal,
-  CajuPayWebhookConfig,
-  CajuPayWebhookLog,
+  MercadoPagoWebhookConfig,
+  MercadoPagoWebhookLog,
 } from '../types';
 
 const DB_NAME = 'ParedaoGK_OfflineStore';
@@ -434,28 +434,28 @@ export function getOfflineAdminWithdrawals(): AdminPixWithdrawal[] {
   return (getLocalStorageFallback('admin_withdrawals') as AdminPixWithdrawal[] | null) || [];
 }
 
-export function saveOfflineWebhookConfig(config: CajuPayWebhookConfig): void {
+export function saveOfflineWebhookConfig(config: MercadoPagoWebhookConfig): void {
   try {
-    localStorage.setItem(`${LOCAL_STORAGE_PREFIX}cajupay_webhook_config`, JSON.stringify(config));
+    localStorage.setItem(`${LOCAL_STORAGE_PREFIX}mercadopago_webhook_config`, JSON.stringify(config));
   } catch (e) {
     console.warn('[OfflineStore WebhookConfig Error]', e);
   }
 }
 
-export function getOfflineWebhookConfig(): CajuPayWebhookConfig | null {
-  return getLocalStorageFallback('cajupay_webhook_config') as CajuPayWebhookConfig | null;
+export function getOfflineWebhookConfig(): MercadoPagoWebhookConfig | null {
+  return getLocalStorageFallback('mercadopago_webhook_config') as MercadoPagoWebhookConfig | null;
 }
 
-export function saveOfflineWebhookLogs(logs: CajuPayWebhookLog[]): void {
+export function saveOfflineWebhookLogs(logs: MercadoPagoWebhookLog[]): void {
   try {
-    localStorage.setItem(`${LOCAL_STORAGE_PREFIX}cajupay_webhook_logs`, JSON.stringify(logs.slice(0, 80)));
+    localStorage.setItem(`${LOCAL_STORAGE_PREFIX}mercadopago_webhook_logs`, JSON.stringify(logs.slice(0, 80)));
   } catch (e) {
     console.warn('[OfflineStore WebhookLogs Error]', e);
   }
 }
 
-export function getOfflineWebhookLogs(): CajuPayWebhookLog[] {
-  return (getLocalStorageFallback('cajupay_webhook_logs') as CajuPayWebhookLog[] | null) || [];
+export function getOfflineWebhookLogs(): MercadoPagoWebhookLog[] {
+  return (getLocalStorageFallback('mercadopago_webhook_logs') as MercadoPagoWebhookLog[] | null) || [];
 }
 
 

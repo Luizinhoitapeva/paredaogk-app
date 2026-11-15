@@ -337,7 +337,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
                   </span>
                 ) : (
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-[#22c55e] border border-emerald-500/30">
-                    CajuPay
+                    Mercado Pago
                   </span>
                 )}
               </button>

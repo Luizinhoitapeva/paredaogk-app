@@ -645,7 +645,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
                     O Radar de Itapeva está pronto para os primeiros Paredões
                   </h3>
                   <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed max-w-xl mx-auto">
-                    Ainda não há goleiros cadastrados na base oficial para esta região. Seja um dos pioneiros de Itapeva a aparecer no radar, receber convocações via Pix CajuPay e disputar o Ranking Semanal.
+                    Ainda não há goleiros cadastrados na base oficial para esta região. Seja um dos pioneiros de Itapeva a aparecer no radar, receber convocações via Pix Mercado Pago e disputar o Ranking Semanal.
                   </p>
                 </div>
 

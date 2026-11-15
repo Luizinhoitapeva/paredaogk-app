@@ -117,13 +117,13 @@ function drawStarVector(
 function getScopeLabel(scope: ReportScope): string {
   switch (scope) {
     case 'financeiro':
-      return 'EXTRATO FINANCEIRO & CUSTÓDIA CAJUPAY';
+      return 'EXTRATO FINANCEIRO & CUSTÓDIA MERCADO PAGO';
     case 'desempenho':
       return 'DOSSIÊ DE DESEMPENHO & AVALIAÇÕES GK';
     case 'partida':
       return 'RELATÓRIO EXECUTIVO DA PARTIDA & PARECER AI';
     default:
-      return 'RELATÓRIO CORPORATIVO CONSOLIDADO (DESEMPENHO & CAJUPAY)';
+      return 'RELATÓRIO CORPORATIVO CONSOLIDADO (DESEMPENHO & MERCADO PAGO)';
   }
 }
 
@@ -151,7 +151,7 @@ function getTxTypeLabel(type: Transaction['type']): string {
  * - Cabeçalho oficial ParedãoGK com logo vetorial, e-mail paredaogkbr@gmail.com e suporte (15) 98159-6443
  * - Dados auditados do atleta/contratante
  * - Métricas de Clean Sheets, pênaltis e avaliações (1-5 estrelas)
- * - Sumário financeiro e extrato CajuPay (Saldo, Custódia, Cashback e Saques Pix)
+ * - Sumário financeiro e extrato Mercado Pago (Saldo, Custódia, Cashback e Saques Pix)
  * - Histórico de partidas com avaliações e resumo analítico pós-jogo AI
  */
 export function generateGoalkeeperPerformancePdf({
@@ -222,7 +222,7 @@ export function generateGoalkeeperPerformancePdf({
     );
     doc.setTextColor(148, 163, 184);
     doc.text(
-      'Ecossistema Oficial de Goleiros · Liquidação CajuPay & Supabase Cloud',
+      'Ecossistema Oficial de Goleiros · Liquidação Mercado Pago & Supabase Cloud',
       marginX,
       35.5
     );
@@ -248,7 +248,7 @@ export function generateGoalkeeperPerformancePdf({
     doc.text(`Emissão: ${emissionDate}`, badgeX + 4, 21.5);
     doc.text(`Protocolo: ${docId}`, badgeX + 4, 26.5);
     doc.setTextColor(56, 189, 248);
-    doc.text('Auditado via CajuPay & Supabase', badgeX + 4, 31.5);
+    doc.text('Auditado via Mercado Pago & Supabase', badgeX + 4, 31.5);
 
     // 2. Identificação do Atleta / Organizador
     let currentY = 52;
@@ -425,12 +425,12 @@ export function generateGoalkeeperPerformancePdf({
       currentY = boxY + boxHeight + 7;
     }
 
-    // 4. Sumário Financeiro CajuPay (Carteira, Custódia, Cashback, Saques Pix)
+    // 4. Sumário Financeiro Mercado Pago (Carteira, Custódia, Cashback, Saques Pix)
     if (scope === 'completo' || scope === 'financeiro') {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(10);
       doc.setTextColor(15, 23, 42);
-      doc.text('SUMÁRIO FINANCEIRO CAJUPAY (CARTEIRA, CUSTÓDIA & PIX)', marginX, currentY);
+      doc.text('SUMÁRIO FINANCEIRO MERCADO PAGO (CARTEIRA, CUSTÓDIA & PIX)', marginX, currentY);
 
       const boxGap = 3;
       const boxWidth = (contentWidth - boxGap * 3) / 4;
@@ -448,7 +448,7 @@ export function generateGoalkeeperPerformancePdf({
         {
           title: 'Saldo em Custódia',
           value: formatCurrency(custodyBalance),
-          sub: 'Garantia CajuPay ativa',
+          sub: 'Garantia Mercado Pago ativa',
           border: [56, 189, 248],
           accent: [2, 132, 199],
         },
@@ -675,7 +675,7 @@ export function generateGoalkeeperPerformancePdf({
       currentY = ((doc as any).lastAutoTable?.finalY ?? currentY + 25) + 8;
     }
 
-    // 7. Extrato Financeiro CajuPay (Movimentações Pix & Custódia)
+    // 7. Extrato Financeiro Mercado Pago (Movimentações Pix & Custódia)
     if (scope === 'completo' || scope === 'financeiro') {
       if (currentY > pageHeight - 45) {
         doc.addPage();
@@ -685,7 +685,7 @@ export function generateGoalkeeperPerformancePdf({
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(10);
       doc.setTextColor(15, 23, 42);
-      doc.text('EXTRATO FINANCEIRO CAJUPAY (PIX, CUSTÓDIA & CASHBACK)', marginX, currentY);
+      doc.text('EXTRATO FINANCEIRO MERCADO PAGO (PIX, CUSTÓDIA & CASHBACK)', marginX, currentY);
 
       const txRows =
         txList.length > 0
@@ -695,7 +695,7 @@ export function generateGoalkeeperPerformancePdf({
                 tx.date || '-',
                 tx.description,
                 tx.receiptCode || '-',
-                (tx.provider || 'cajupay').toUpperCase(),
+                (tx.provider || 'mercadopago').toUpperCase(),
                 getTxTypeLabel(tx.type),
                 `${amountPrefix}${formatCurrency(tx.amount)}`,
                 tx.status === 'completed' ? 'Liquidado' : 'Em Curso',
@@ -706,7 +706,7 @@ export function generateGoalkeeperPerformancePdf({
                 '--',
                 'Nenhuma movimentação financeira registrada na carteira até o momento.',
                 '--',
-                'CAJUPAY',
+                'MERCADOPAGO',
                 'Saldo Inicial',
                 'R$ 0,00',
                 'Ativo',
@@ -765,7 +765,7 @@ export function generateGoalkeeperPerformancePdf({
         footerY + 1
       );
       doc.text(
-        'Liquidação financeira processada via CajuPay Pagamentos | Registros sincronizados via Supabase Cloud.',
+        'Liquidação financeira processada via Mercado Pago Pix | Registros sincronizados via Supabase Cloud.',
         marginX,
         footerY + 4.8
       );
@@ -775,7 +775,7 @@ export function generateGoalkeeperPerformancePdf({
       doc.text(`Página ${p} de ${totalPages}`, pageWidth - marginX - 18, footerY + 2.5);
     }
 
-    const scopeSlug = scope === 'completo' ? 'Completo' : scope === 'financeiro' ? 'CajuPay' : scope === 'partida' ? 'Partida' : 'Desempenho';
+    const scopeSlug = scope === 'completo' ? 'Completo' : scope === 'financeiro' ? 'MercadoPago' : scope === 'partida' ? 'Partida' : 'Desempenho';
     const cleanName = user.name.trim().replace(/\s+/g, '_') || 'Atleta';
     const cleanFileName = `Relatorio_ParedaoGK_${scopeSlug}_${cleanName}_${Date.now().toString().slice(-4)}.pdf`;
     doc.save(cleanFileName);

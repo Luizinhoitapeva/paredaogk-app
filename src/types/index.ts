@@ -235,7 +235,7 @@ export interface Transaction {
   pixKey?: string;
   pixKeyType?: 'cpf' | 'phone' | 'email' | 'random';
   receiptCode: string;
-  provider?: 'cajupay' | 'arenadraft' | 'internal';
+  provider?: 'mercadopago' | 'arenadraft' | 'internal';
   matchId?: string;
   arenaName?: string;
   adminNotes?: string;
@@ -372,29 +372,29 @@ export interface AdminPixWithdrawal {
   rejectionReason?: string;
   matchId?: string;
   arenaName?: string;
-  provider: 'cajupay';
+  provider: 'mercadopago';
   requestedAt: string;
   processedAt?: string;
   processedBy?: string;
 }
 
-export type CajuPayWebhookEventType =
+export type MercadoPagoWebhookEventType =
   | 'payment.confirmed'
   | 'custody.released'
   | 'withdrawal.processed'
   | 'withdrawal.rejected';
 
-export interface CajuPayWebhookConfig {
+export interface MercadoPagoWebhookConfig {
   id: string;
   webhookUrl: string;
   signingSecret: string;
   isActive: boolean;
-  subscribedEvents: CajuPayWebhookEventType[];
+  subscribedEvents: MercadoPagoWebhookEventType[];
   updatedAt: string;
   updatedBy?: string;
 }
 
-export interface CajuPayWebhookLog {
+export interface MercadoPagoWebhookLog {
   id: string;
   event: string;
   endpointUrl: string;

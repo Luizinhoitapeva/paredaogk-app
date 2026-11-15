@@ -90,7 +90,7 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
         cache: baseCache,
         bonusCashback: bonusAndCashback,
         total: Number((baseCache + bonusAndCashback).toFixed(2)),
-        statusLabel: m.status === 'completed' ? 'Liberado' : 'Em Custódia CajuPay',
+        statusLabel: m.status === 'completed' ? 'Liberado' : 'Em Custódia Mercado Pago',
       };
     });
   }, [matches]);
@@ -112,7 +112,7 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
     });
   }, [matchEarningsChartData]);
 
-  // Partidas atualmente com saldo retido em custódia CajuPay
+  // Partidas atualmente com saldo retido em custódia Mercado Pago
   const custodyMatches = useMemo(
     () =>
       matches.filter(
@@ -121,7 +121,7 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
     [matches]
   );
 
-  // Histórico específico de saques via Pix pelo CajuPay
+  // Histórico específico de saques via Pix pelo Mercado Pago
   const pixWithdrawals = useMemo(
     () => summary.transactions.filter((t) => t.type === 'pix_out'),
     [summary.transactions]
@@ -166,7 +166,7 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
               Dashboard Financeiro GK
             </span>
             <span aria-hidden="true">·</span>
-            <span>{summary.syncedFromSupabase ? 'Sincronizado com Supabase' : 'Carteira CajuPay'}</span>
+            <span>{summary.syncedFromSupabase ? 'Sincronizado com Supabase' : 'Carteira Mercado Pago'}</span>
             {user.preferredCache && (
               <>
                 <span aria-hidden="true">·</span>
@@ -177,7 +177,7 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
             )}
           </div>
           <h2 className="font-display font-extrabold text-lg sm:text-xl text-slate-900 dark:text-white tracking-tight">
-            Ganhos, Custódia & Saques CajuPay
+            Ganhos, Custódia & Saques Mercado Pago
           </h2>
         </div>
 
@@ -208,7 +208,7 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
             className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#22c55e] to-emerald-600 hover:brightness-110 text-slate-950 font-extrabold text-xs flex items-center gap-1.5 shadow-md shadow-emerald-500/20 transition-all cursor-pointer whitespace-nowrap"
           >
             <GkCoinPixIcon className="w-4 h-4 text-slate-950" />
-            <span>Sacar via Pix CajuPay</span>
+            <span>Sacar via Pix Mercado Pago</span>
           </button>
         </div>
       </div>
@@ -256,7 +256,7 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
 
         <div className="p-4 rounded-2xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 space-y-1.5">
           <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-            <span>Saques Pix CajuPay</span>
+            <span>Saques Pix Mercado Pago</span>
             <ArrowUpRight className="w-4 h-4 text-sky-600 dark:text-[#38bdf8]" />
           </div>
           <div className="font-mono tabular-nums text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white">
@@ -457,14 +457,14 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
         </div>
       </div>
 
-      {/* Custódia CajuPay + Histórico de Saques Pix CajuPay */}
+      {/* Custódia Mercado Pago + Histórico de Saques Pix Mercado Pago */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Valores em Custódia CajuPay */}
+        {/* Valores em Custódia Mercado Pago */}
         <div className="p-5 rounded-3xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 space-y-3.5">
           <div className="flex items-center justify-between">
             <div>
               <h3 className="font-display font-bold text-sm text-slate-900 dark:text-white">
-                Saldo em Custódia (CajuPay)
+                Saldo em Custódia (Mercado Pago)
               </h3>
               <p className="text-[11px] text-slate-500 dark:text-slate-400">
                 Liberação instantânea ao confirmar presença no apito final
@@ -505,12 +505,12 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
           )}
         </div>
 
-        {/* Histórico de Saques via Pix pelo CajuPay */}
+        {/* Histórico de Saques via Pix pelo Mercado Pago */}
         <div className="p-5 rounded-3xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 space-y-3.5">
           <div className="flex items-center justify-between">
             <div>
               <h3 className="font-display font-bold text-sm text-slate-900 dark:text-white">
-                Histórico de Saques via Pix (CajuPay)
+                Histórico de Saques via Pix (Mercado Pago)
               </h3>
               <p className="text-[11px] text-slate-500 dark:text-slate-400">
                 Repasse líquido com conferência administrativa e comprovante
@@ -529,10 +529,10 @@ export const EarningsDashboardSection: React.FC<EarningsDashboardSectionProps> =
           {pixWithdrawals.length === 0 ? (
             <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-center space-y-2">
               <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Nenhum saque Pix CajuPay realizado ainda.
+                Nenhum saque Pix Mercado Pago realizado ainda.
               </p>
               <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                Quando você transferir seu saldo disponível via Pix, o comprovante CajuPay aparecerá aqui.
+                Quando você transferir seu saldo disponível via Pix, o comprovante Mercado Pago aparecerá aqui.
               </p>
             </div>
           ) : (

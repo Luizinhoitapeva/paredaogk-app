@@ -13,9 +13,9 @@ import {
   NotificationItem,
   AdminPixWithdrawal,
   AdminPixWithdrawalStatus,
-  CajuPayWebhookConfig,
-  CajuPayWebhookEventType,
-  CajuPayWebhookLog,
+  MercadoPagoWebhookConfig,
+  MercadoPagoWebhookEventType,
+  MercadoPagoWebhookLog,
 } from '../types';
 import { evaluateGoalkeeperArenaProximity, normalizeSearchText } from '../utils/arenaProximitySearch';
 import { classifyGoalkeeperTier, getMatchGoalkeeperNetPayout, getTierByTotalPrice, ITAPEVA_HOUSE_FEE } from '../utils/cachePricingAI';
@@ -75,7 +75,7 @@ export function getAuthRedirectUrl(): string {
  */
 export async function safeParseJsonResponse<T = any>(
   response: Response,
-  contextLabel = 'API CajuPay'
+  contextLabel = 'API Mercado Pago'
 ): Promise<{
   valid: boolean;
   data: T | null;
@@ -846,7 +846,7 @@ export function playWhistleNotification() {
 
 /**
  * Configura a escuta em tempo real (Supabase Realtime) nas tabelas 'notifications' e 'matches',
- * além do canal de broadcast direto para liquidação instantânea via CajuPay.
+ * além do canal de broadcast direto para liquidação instantânea via Mercado Pago.
  */
 export function subscribeToRealtimeBookingsAndNotifications(callbacks: {
   onNotification: (newRecord: any) => void;
@@ -881,12 +881,12 @@ export function subscribeToRealtimeBookingsAndNotifications(callbacks: {
     }
   );
 
-  // 3. Canal de Broadcast imediato para liquidação de pagamento CajuPay Pix
+  // 3. Canal de Broadcast imediato para liquidação de pagamento Mercado Pago Pix
   channel.on(
     'broadcast',
-    { event: 'cajupay_payment_liquidated' },
+    { event: 'mercadopago_payment_liquidated' },
     ({ payload }) => {
-      console.log('[Supabase Realtime Broadcast: CajuPay Liquidado]', payload);
+      console.log('[Supabase Realtime Broadcast: Mercado Pago Liquidado]', payload);
       callbacks.onGoalkeeperCallAlert(payload);
       playWhistleNotification();
     }
@@ -930,7 +930,7 @@ export async function broadcastBookingConfirmed(booking: any) {
     const channel = supabase.channel('paredaogk-realtime-matches');
     await channel.send({
       type: 'broadcast',
-      event: 'cajupay_payment_liquidated',
+      event: 'mercadopago_payment_liquidated',
       payload: booking,
     });
 
@@ -949,7 +949,7 @@ export async function broadcastBookingConfirmed(booking: any) {
           modality: booking.modality,
           price: booking.price,
           status: 'confirmed',
-          payment_provider: 'cajupay',
+          payment_provider: 'mercadopago',
           payment_status: 'paid',
           created_at: new Date().toISOString(),
         },
@@ -960,7 +960,7 @@ export async function broadcastBookingConfirmed(booking: any) {
           {
             id: `notif-${Date.now()}`,
             title: '🚨 Nova Convocação Confirmada via Pix!',
-            description: `Partida confirmada na ${booking.arenaName} (${booking.date} às ${booking.time}). Cachê de R$ ${booking.price?.toFixed(2)} liquidado via CajuPay.`,
+            description: `Partida confirmada na ${booking.arenaName} (${booking.date} às ${booking.time}). Cachê de R$ ${booking.price?.toFixed(2)} liquidado via Mercado Pago.`,
             user_id: booking.goalkeeperId,
             category: 'match',
             created_at: new Date().toISOString(),
@@ -1076,7 +1076,7 @@ export async function reinviteGoalkeeperNextWeek(params: {
           modality: newBooking.modality,
           price: newBooking.price,
           status: 'confirmed',
-          payment_provider: 'cajupay',
+          payment_provider: 'mercadopago',
           payment_status: 'paid',
           created_at: newBooking.createdAt,
         },
@@ -1260,7 +1260,7 @@ export async function triggerSosSubstitution(params: {
 
 /**
  * Busca dados completos da carteira e Dashboard de Ganhos nas tabelas do Supabase:
- * 'profiles' (saldos), 'wallet_transactions' (saques Pix CajuPay, depósitos e cashbacks) e 'matches'.
+ * 'profiles' (saldos), 'wallet_transactions' (saques Pix Mercado Pago, depósitos e cashbacks) e 'matches'.
  */
 export async function fetchWalletDashboardFromSupabase(params: {
   user: UserProfile;
@@ -1310,8 +1310,8 @@ export async function fetchWalletDashboardFromSupabase(params: {
           status: row.status || 'completed',
           pixKey: row.pix_key,
           pixKeyType: row.pix_key_type,
-          receiptCode: row.receipt_code || `CAJU-${String(row.id).slice(-6).toUpperCase()}`,
-          provider: row.provider || 'cajupay',
+          receiptCode: row.receipt_code || `MP-${String(row.id).slice(-6).toUpperCase()}`,
+          provider: row.provider || 'mercadopago',
           matchId: row.match_id,
           arenaName: row.arena_name,
         }));
@@ -1375,7 +1375,7 @@ export async function fetchWalletDashboardFromSupabase(params: {
 }
 
 /**
- * Grava uma nova transação (saque Pix CajuPay, depósito, cachê ou cashback) na tabela
+ * Grava uma nova transação (saque Pix Mercado Pago, depósito, cachê ou cashback) na tabela
  * 'wallet_transactions' e atualiza os saldos em 'profiles' no Supabase.
  */
 export async function recordWalletTransactionInSupabase(params: {
@@ -1400,7 +1400,7 @@ export async function recordWalletTransactionInSupabase(params: {
         pix_key: params.transaction.pixKey || null,
         pix_key_type: params.transaction.pixKeyType || null,
         receipt_code: params.transaction.receiptCode,
-        provider: params.transaction.provider || 'cajupay',
+        provider: params.transaction.provider || 'mercadopago',
         match_id: params.transaction.matchId || null,
         arena_name: params.transaction.arenaName || null,
         created_at: new Date().toISOString(),
@@ -1427,9 +1427,9 @@ export async function recordWalletTransactionInSupabase(params: {
   }
 }
 
-export interface CajuPayPixChargeResponse {
+export interface MercadoPagoPixChargeResponse {
   success: boolean;
-  provider: 'cajupay' | 'cajupay-sandbox';
+  provider: 'mercadopago' | 'mercadopago-sandbox';
   id: string;
   status: string;
   amount: number;
@@ -1437,6 +1437,7 @@ export interface CajuPayPixChargeResponse {
   goalkeeperNet: number;
   qrCodeText: string;
   qrCodeBase64: string | null;
+  ticketUrl?: string | null;
   expiresAt: string;
   idempotencyKey?: string;
   publicKeyConfigured?: boolean;
@@ -1445,10 +1446,10 @@ export interface CajuPayPixChargeResponse {
 }
 
 /**
- * Chama o backend integrado à API CajuPay utilizando VITE_CAJUPAY_PUBLIC_KEY e CAJUPAY_SECRET_KEY
- * para gerar QR Code dinâmico real e código Pix Copia e Cola.
+ * Chama o backend integrado à API oficial do Mercado Pago (/v1/payments) utilizando
+ * VITE_MERCADOPAGO_PUBLIC_KEY e MERCADOPAGO_ACCESS_TOKEN para gerar QR Code base64 e Copia e Cola.
  */
-export async function generateCajuPayPixCharge(params: {
+export async function generateMercadoPagoPixCharge(params: {
   amount: number;
   userId?: string;
   description?: string;
@@ -1460,18 +1461,18 @@ export async function generateCajuPayPixCharge(params: {
     cpf?: string;
     phone?: string;
   };
-}): Promise<CajuPayPixChargeResponse> {
-  const publicKey = import.meta.env.VITE_CAJUPAY_PUBLIC_KEY || '';
+}): Promise<MercadoPagoPixChargeResponse> {
+  const publicKey = import.meta.env.VITE_MERCADOPAGO_PUBLIC_KEY || '';
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
   if (publicKey && !publicKey.startsWith('MY_') && !publicKey.includes('placeholder')) {
-    headers['X-CajuPay-Public-Key'] = publicKey;
+    headers['X-MercadoPago-Public-Key'] = publicKey;
   }
 
   let response: Response;
   try {
-    response = await fetch('/api/gerar-pix-caju', {
+    response = await fetch('/api/gerar-pix-mercadopago', {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -1487,38 +1488,41 @@ export async function generateCajuPayPixCharge(params: {
   } catch (networkErr: any) {
     throw new Error(
       networkErr?.message
-        ? `Falha de conexão com o servidor Pix CajuPay (${networkErr.message}).`
-        : 'Não foi possível conectar ao servidor Pix CajuPay.'
+        ? `Falha de conexão com o servidor Pix Mercado Pago (${networkErr.message}).`
+        : 'Não foi possível conectar ao servidor Pix Mercado Pago.'
     );
   }
 
-  const parsed = await safeParseJsonResponse<CajuPayPixChargeResponse>(response, 'API CajuPay Pix');
+  const parsed = await safeParseJsonResponse<MercadoPagoPixChargeResponse>(
+    response,
+    'API Mercado Pago Pix'
+  );
   if (!parsed.valid || !parsed.data) {
     throw new Error(
       parsed.errorMessage ||
-        'A API do CajuPay retornou uma resposta inválida ou vazia ao gerar o Pix.'
+        'A API do Mercado Pago retornou uma resposta inválida ou vazia ao gerar o Pix.'
     );
   }
 
   const data = parsed.data;
   if (!response.ok || !data?.success) {
-    throw new Error(data?.error || `Falha ao gerar cobrança Pix no CajuPay (HTTP ${response.status}).`);
+    throw new Error(data?.error || `Falha ao gerar cobrança Pix no Mercado Pago (HTTP ${response.status}).`);
   }
   return data;
 }
 
 /**
- * Consulta status de confirmação da cobrança Pix CajuPay (atualizado pelo webhook /api/webhook-caju).
+ * Consulta status de confirmação da cobrança Pix Mercado Pago (atualizado via /v1/payments ou webhook /api/webhook-mercadopago).
  */
-export async function checkCajuPayPaymentStatus(paymentId: string): Promise<{
+export async function checkMercadoPagoPaymentStatus(paymentId: string): Promise<{
   status: 'pending' | 'completed' | 'failed';
   receiptCode?: string;
   supabaseCredited?: boolean;
 }> {
   try {
-    const res = await fetch(`/api/cajupay/payment-status/${encodeURIComponent(paymentId)}`);
+    const res = await fetch(`/api/mercadopago/payment-status/${encodeURIComponent(paymentId)}`);
     if (!res.ok) return { status: 'pending' };
-    const parsed = await safeParseJsonResponse(res, 'Status Pix CajuPay');
+    const parsed = await safeParseJsonResponse(res, 'Status Pix Mercado Pago');
     if (!parsed.valid || !parsed.data) return { status: 'pending' };
     const json = parsed.data;
     return {
@@ -1532,9 +1536,9 @@ export async function checkCajuPayPaymentStatus(paymentId: string): Promise<{
 }
 
 /**
- * Dispara simulação homologada de webhook payment.confirmed assinado com HMAC-SHA256 no servidor.
+ * Dispara simulação homologada de webhook payment.confirmed do Mercado Pago no servidor.
  */
-export async function simulateCajuPayWebhookConfirmation(params: {
+export async function simulateMercadoPagoWebhookConfirmation(params: {
   paymentId: string;
   amount: number;
   userId?: string;
@@ -1549,7 +1553,7 @@ export async function simulateCajuPayWebhookConfirmation(params: {
 }> {
   let res: Response;
   try {
-    res = await fetch('/api/cajupay/simulate-webhook', {
+    res = await fetch('/api/mercadopago/simulate-webhook', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1561,27 +1565,27 @@ export async function simulateCajuPayWebhookConfirmation(params: {
     });
   } catch (networkErr: any) {
     throw new Error(
-      networkErr?.message || 'Falha de rede ao comunicar com o webhook de homologação CajuPay.'
+      networkErr?.message || 'Falha de rede ao comunicar com o webhook de homologação Mercado Pago.'
     );
   }
 
-  const parsed = await safeParseJsonResponse(res, 'Webhook Simulação CajuPay');
+  const parsed = await safeParseJsonResponse(res, 'Webhook Simulação Mercado Pago');
   if (!parsed.valid || !parsed.data) {
     throw new Error(
-      parsed.errorMessage || 'Resposta vazia ou inválida ao confirmar pagamento no webhook CajuPay.'
+      parsed.errorMessage || 'Resposta vazia ou inválida ao confirmar pagamento no webhook Mercado Pago.'
     );
   }
 
   const data = parsed.data;
   if (!res.ok || !data?.success) {
-    throw new Error(data?.error || 'Falha ao confirmar pagamento via webhook CajuPay.');
+    throw new Error(data?.error || 'Falha ao confirmar pagamento via webhook Mercado Pago.');
   }
 
   return {
     success: true,
     paymentId: String(data.paymentId || params.paymentId),
     amount: Number(data.amount || params.amount),
-    receiptCode: String(data.receiptCode || `CAJU-${Date.now().toString().slice(-6)}`),
+    receiptCode: String(data.receiptCode || `MP-${Date.now().toString().slice(-6)}`),
     supabaseCredited: Boolean(data.supabaseCredited),
     newWalletBalance: typeof data.newWalletBalance === 'number' ? data.newWalletBalance : undefined,
   };
@@ -1605,16 +1609,16 @@ export async function creditWalletDepositInSupabase(params: {
   alreadyCredited?: boolean;
   errorMessage?: string;
 }> {
-  const txId = `tx-caju-${params.paymentId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  const txId = `tx-mp-${params.paymentId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const transaction: Transaction = {
     id: txId,
     type: 'pix_in',
     amount: params.amount,
-    description: params.description || 'Recarga Pix CajuPay Instantânea',
+    description: params.description || 'Recarga Pix Mercado Pago Instantânea',
     date: new Date().toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }),
     status: 'completed',
     receiptCode: params.receiptCode,
-    provider: 'cajupay',
+    provider: 'mercadopago',
   };
 
   if (!isSupabaseConfigured || !params.userId || params.userId === 'usr-guest') {
@@ -1671,7 +1675,7 @@ export async function creditWalletDepositInSupabase(params: {
         description: transaction.description,
         status: 'completed',
         receipt_code: params.receiptCode,
-        provider: 'cajupay',
+        provider: 'mercadopago',
         created_at: nowIso,
       },
     ]);
@@ -2319,7 +2323,7 @@ export async function fetchNotificationsFromSupabase(userId?: string): Promise<N
 }
 
 // ==========================================
-// 9. ADMIN FINANCEIRO: SAQUES PIX & WEBHOOKS CAJUPAY
+// 9. ADMIN FINANCEIRO: SAQUES PIX & WEBHOOKS MERCADO PAGO
 // ==========================================
 
 function mapTransactionStatusToAdmin(rawStatus?: string): AdminPixWithdrawalStatus {
@@ -2359,7 +2363,7 @@ export function registerAdminWithdrawalRequestLocal(params: {
     adminNotes: params.transaction.adminNotes,
     matchId: params.transaction.matchId,
     arenaName: params.transaction.arenaName,
-    provider: 'cajupay',
+    provider: 'mercadopago',
     requestedAt: new Date().toISOString(),
   };
 
@@ -2435,12 +2439,12 @@ export async function fetchAdminPixWithdrawalsFromSupabase(): Promise<{
             netPayout,
             requestedAmount,
             status: mapTransactionStatusToAdmin(row.status),
-            receiptCode: row.receipt_code || `CAJU-${String(row.id).slice(-6).toUpperCase()}`,
+            receiptCode: row.receipt_code || `MP-${String(row.id).slice(-6).toUpperCase()}`,
             adminNotes: row.admin_notes || undefined,
             rejectionReason: row.rejection_reason || undefined,
             matchId: row.match_id || undefined,
             arenaName: row.arena_name || undefined,
-            provider: 'cajupay',
+            provider: 'mercadopago',
             requestedAt: row.created_at || new Date().toISOString(),
             processedAt: row.updated_at || undefined,
           };
@@ -2488,7 +2492,7 @@ export async function processAdminPixWithdrawalInSupabase(params: {
   const finalReceiptCode =
     params.receiptCode?.trim() ||
     params.withdrawal.receiptCode ||
-    `CAJU-PIX-${Date.now().toString().slice(-6)}`;
+    `MP-PIX-${Date.now().toString().slice(-6)}`;
 
   const updated: AdminPixWithdrawal = {
     ...params.withdrawal,
@@ -2516,7 +2520,7 @@ export async function processAdminPixWithdrawalInSupabase(params: {
           receipt_code: finalReceiptCode,
           description:
             nextStatus === 'approved'
-              ? `Saque Pix CajuPay Pago (${params.withdrawal.pixKeyType.toUpperCase()})`
+              ? `Saque Pix Mercado Pago Pago (${params.withdrawal.pixKeyType.toUpperCase()})`
               : `Saque Pix Rejeitado (${params.rejectionReason || 'Estornado à carteira'})`,
         })
         .eq('id', params.withdrawal.id);
@@ -2550,7 +2554,7 @@ export async function processAdminPixWithdrawalInSupabase(params: {
             category: 'wallet',
             title:
               nextStatus === 'approved'
-                ? '💸 Saque Pix CajuPay Aprovado & Pago!'
+                ? '💸 Saque Pix Mercado Pago Aprovado & Pago!'
                 : '⚠️ Solicitação de Saque Pix Rejeitada',
             description:
               nextStatus === 'approved'
@@ -2576,17 +2580,17 @@ export async function processAdminPixWithdrawalInSupabase(params: {
 }
 
 /**
- * Busca configuração e logs de Webhooks CajuPay integrando API Express + Supabase + Cache local
+ * Busca configuração e logs de Webhooks Mercado Pago integrando API Express + Supabase + Cache local
  */
-export async function fetchCajuPayWebhookConfigAndLogs(defaultEndpointUrl: string): Promise<{
-  config: CajuPayWebhookConfig;
-  logs: CajuPayWebhookLog[];
+export async function fetchMercadoPagoWebhookConfigAndLogs(defaultEndpointUrl: string): Promise<{
+  config: MercadoPagoWebhookConfig;
+  logs: MercadoPagoWebhookLog[];
   syncedFromSupabase: boolean;
 }> {
-  const defaultConfig: CajuPayWebhookConfig = getOfflineWebhookConfig() || {
-    id: 'cajupay-webhook-default',
+  const defaultConfig: MercadoPagoWebhookConfig = getOfflineWebhookConfig() || {
+    id: 'mercadopago-webhook-default',
     webhookUrl: defaultEndpointUrl,
-    signingSecret: 'cwhsec_555f1354b2a2851360c50f9bccb3dc9a2d76d7aab72bd82d',
+    signingSecret: 'mpwhsec_paredaogk_itapeva_2026',
     isActive: true,
     subscribedEvents: [
       'payment.confirmed',
@@ -2607,15 +2611,15 @@ export async function fetchCajuPayWebhookConfigAndLogs(defaultEndpointUrl: strin
   }
 
   let config = defaultConfig;
-  const logsMap = new Map<string, CajuPayWebhookLog>();
+  const logsMap = new Map<string, MercadoPagoWebhookLog>();
   getOfflineWebhookLogs().forEach((l) => logsMap.set(l.id, l));
   let syncedFromSupabase = false;
 
-  // 1. Buscar estado atual do servidor Express (/api/admin/cajupay-webhooks)
+  // 1. Buscar estado atual do servidor Express (/api/admin/mercadopago-webhooks)
   try {
-    const res = await fetch('/api/admin/cajupay-webhooks');
+    const res = await fetch('/api/admin/mercadopago-webhooks');
     if (res.ok) {
-      const parsed = await safeParseJsonResponse(res, 'Admin Webhooks CajuPay');
+      const parsed = await safeParseJsonResponse(res, 'Admin Webhooks Mercado Pago');
       const json = parsed.valid ? parsed.data : null;
       if (json?.config) {
         config = {
@@ -2634,7 +2638,7 @@ export async function fetchCajuPayWebhookConfigAndLogs(defaultEndpointUrl: strin
         };
       }
       if (Array.isArray(json?.logs)) {
-        json.logs.forEach((l: CajuPayWebhookLog) => logsMap.set(l.id, l));
+        json.logs.forEach((l: MercadoPagoWebhookLog) => logsMap.set(l.id, l));
       }
     }
   } catch {
@@ -2648,7 +2652,7 @@ export async function fetchCajuPayWebhookConfigAndLogs(defaultEndpointUrl: strin
         supabase
           .from('cajupay_webhook_configs')
           .select('*')
-          .eq('id', 'cajupay-webhook-default')
+          .eq('id', 'mercadopago-webhook-default')
           .maybeSingle(),
         supabase
           .from('cajupay_webhook_logs')
@@ -2683,14 +2687,14 @@ export async function fetchCajuPayWebhookConfigAndLogs(defaultEndpointUrl: strin
             signatureHeader: row.signature_header || '',
             payload: row.payload || {},
             responseBody: row.response_body || undefined,
-            source: (row.source || 'live') as CajuPayWebhookLog['source'],
+            source: (row.source || 'live') as MercadoPagoWebhookLog['source'],
             createdAt: row.created_at || new Date().toISOString(),
           });
         });
         syncedFromSupabase = true;
       }
     } catch (err) {
-      console.warn('[fetchCajuPayWebhookConfigAndLogs Supabase note]', err);
+      console.warn('[fetchMercadoPagoWebhookConfigAndLogs Supabase note]', err);
     }
   }
 
@@ -2705,12 +2709,12 @@ export async function fetchCajuPayWebhookConfigAndLogs(defaultEndpointUrl: strin
 }
 
 /**
- * Salva configurações do Webhook CajuPay no servidor Express, Supabase e cache local
+ * Salva configurações do Webhook Mercado Pago no servidor Express, Supabase e cache local
  */
-export async function saveCajuPayWebhookConfig(params: {
-  config: CajuPayWebhookConfig;
+export async function saveMercadoPagoWebhookConfig(params: {
+  config: MercadoPagoWebhookConfig;
   adminEmail: string;
-}): Promise<{ config: CajuPayWebhookConfig; syncedToSupabase: boolean }> {
+}): Promise<{ config: MercadoPagoWebhookConfig; syncedToSupabase: boolean }> {
   if (!isAuthorizedAdmin(params.adminEmail)) {
     throw new Error('Acesso administrativo negado: somente luizinhoitapevasp@gmail.com pode alterar webhooks.');
   }
@@ -2723,14 +2727,14 @@ export async function saveCajuPayWebhookConfig(params: {
     }
   }
 
-  const updatedConfig: CajuPayWebhookConfig = {
+  const updatedConfig: MercadoPagoWebhookConfig = {
     ...params.config,
     updatedAt: new Date().toISOString(),
     updatedBy: params.adminEmail,
   };
 
   try {
-    await fetch('/api/admin/cajupay-webhooks/config', {
+    await fetch('/api/admin/mercadopago-webhooks/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updatedConfig),
@@ -2755,7 +2759,7 @@ export async function saveCajuPayWebhookConfig(params: {
       ]);
       syncedToSupabase = !error;
     } catch (err) {
-      console.warn('[Supabase saveCajuPayWebhookConfig note]', err);
+      console.warn('[Supabase saveMercadoPagoWebhookConfig note]', err);
     }
   }
 
@@ -2766,12 +2770,12 @@ export async function saveCajuPayWebhookConfig(params: {
 /**
  * Dispara payload de teste assinado com HMAC-SHA256 para validação de segurança do endpoint
  */
-export async function dispatchCajuPayWebhookTest(params: {
-  event: CajuPayWebhookEventType;
+export async function dispatchMercadoPagoWebhookTest(params: {
+  event: MercadoPagoWebhookEventType;
   webhookUrl: string;
   simulateInvalidSignature?: boolean;
   customAmount?: number;
-}): Promise<{ log: CajuPayWebhookLog; syncedToSupabase: boolean }> {
+}): Promise<{ log: MercadoPagoWebhookLog; syncedToSupabase: boolean }> {
   if (isSupabaseConfigured) {
     const {
       data: { session },
@@ -2781,23 +2785,23 @@ export async function dispatchCajuPayWebhookTest(params: {
     }
   }
 
-  let log: CajuPayWebhookLog | null = null;
+  let log: MercadoPagoWebhookLog | null = null;
 
   try {
-    const res = await fetch('/api/admin/cajupay-webhooks/test', {
+    const res = await fetch('/api/admin/mercadopago-webhooks/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
     if (res.ok) {
-      const parsed = await safeParseJsonResponse(res, 'Teste Webhook CajuPay');
+      const parsed = await safeParseJsonResponse(res, 'Teste Webhook Mercado Pago');
       const json = parsed.valid ? parsed.data : null;
       if (json?.log) {
-        log = json.log as CajuPayWebhookLog;
+        log = json.log as MercadoPagoWebhookLog;
       }
     }
   } catch (err) {
-    console.warn('[dispatchCajuPayWebhookTest Server note]', err);
+    console.warn('[dispatchMercadoPagoWebhookTest Server note]', err);
   }
 
   if (!log) {
@@ -2812,10 +2816,11 @@ export async function dispatchCajuPayWebhookTest(params: {
         ? 'invalid_hmac_signature_test'
         : 'local_hmac_sha256_verified',
       payload: {
-        id: `evt_local_${Date.now().toString().slice(-6)}`,
+        id: `evt_mp_${Date.now().toString().slice(-6)}`,
         event: params.event,
         created_at: nowIso,
         data: {
+          transaction_amount: params.customAmount || 25,
           amount_brl: params.customAmount || 25,
           house_fee_brl: 5,
           goalkeeper_net_brl: Math.max(0, (params.customAmount || 25) - 5),
@@ -2864,7 +2869,7 @@ export async function dispatchCajuPayWebhookTest(params: {
  */
 export function subscribeToAdminFinancialRealtime(callbacks: {
   onWithdrawalChange: () => void;
-  onWebhookLog: (log: CajuPayWebhookLog) => void;
+  onWebhookLog: (log: MercadoPagoWebhookLog) => void;
 }) {
   if (!isSupabaseConfigured) return () => {};
 
@@ -2895,13 +2900,13 @@ export function subscribeToAdminFinancialRealtime(callbacks: {
         callbacks.onWebhookLog({
           id: String(row.id),
           event: row.event || 'payment.confirmed',
-          endpointUrl: row.endpoint_url || '/api/webhook-caju',
+          endpointUrl: row.endpoint_url || '/api/webhook-mercadopago',
           httpStatus: Number(row.http_status || 200),
           hmacValid: Boolean(row.hmac_valid),
           signatureHeader: row.signature_header || '',
           payload: row.payload || {},
           responseBody: row.response_body || undefined,
-          source: (row.source || 'live') as CajuPayWebhookLog['source'],
+          source: (row.source || 'live') as MercadoPagoWebhookLog['source'],
           createdAt: row.created_at || new Date().toISOString(),
         });
       }

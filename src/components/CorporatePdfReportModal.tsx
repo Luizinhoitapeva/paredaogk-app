@@ -180,7 +180,7 @@ export const CorporatePdfReportModal: React.FC<CorporatePdfReportModalProps> = (
 
   const scopeOptions: Array<{ id: ReportScope; label: string }> = [
     { id: 'completo', label: 'Relatório Completo' },
-    { id: 'financeiro', label: 'Financeiro & CajuPay' },
+    { id: 'financeiro', label: 'Financeiro & Mercado Pago' },
     { id: 'desempenho', label: 'Desempenho & Notas' },
   ];
   if (selectedMatch) {
@@ -328,7 +328,7 @@ export const CorporatePdfReportModal: React.FC<CorporatePdfReportModalProps> = (
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-300 font-medium">
-                      Ecossistema Oficial de Goleiros Amadores · ArenaDraft & CajuPay
+                      Ecossistema Oficial de Goleiros Amadores · ArenaDraft & Mercado Pago
                     </p>
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono text-slate-300 pt-0.5">
                       <span>paredaogkbr@gmail.com</span>
@@ -522,7 +522,7 @@ export const CorporatePdfReportModal: React.FC<CorporatePdfReportModalProps> = (
                 </section>
               )}
 
-              {/* 4. Sumário Financeiro CajuPay */}
+              {/* 4. Sumário Financeiro Mercado Pago */}
               {(scope === 'completo' || scope === 'financeiro') && (
                 <section className="space-y-2.5">
                   <h4
@@ -531,7 +531,7 @@ export const CorporatePdfReportModal: React.FC<CorporatePdfReportModalProps> = (
                     }`}
                   >
                     <GkCoinPixIcon className="w-4 h-4 text-[#38bdf8]" />
-                    <span>Sumário Financeiro CajuPay (Pix, Custódia & Cashback)</span>
+                    <span>Sumário Financeiro Mercado Pago (Pix, Custódia & Cashback)</span>
                   </h4>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div
@@ -763,7 +763,7 @@ export const CorporatePdfReportModal: React.FC<CorporatePdfReportModalProps> = (
                 </section>
               )}
 
-              {/* 7. Tabela Extrato Financeiro CajuPay */}
+              {/* 7. Tabela Extrato Financeiro Mercado Pago */}
               {(scope === 'completo' || scope === 'financeiro') && (
                 <section className="space-y-2.5">
                   <h4
@@ -771,7 +771,7 @@ export const CorporatePdfReportModal: React.FC<CorporatePdfReportModalProps> = (
                       isDarkSheet ? 'text-slate-300' : 'text-slate-700'
                     }`}
                   >
-                    Extrato Financeiro CajuPay (Pix, Custódia & Cashback)
+                    Extrato Financeiro Mercado Pago (Pix, Custódia & Cashback)
                   </h4>
                   <div
                     className={`overflow-x-auto rounded-xl border ${
@@ -796,7 +796,7 @@ export const CorporatePdfReportModal: React.FC<CorporatePdfReportModalProps> = (
                         {txList.length === 0 ? (
                           <tr>
                             <td colSpan={5} className="py-4 px-3 text-center text-slate-500">
-                              Nenhuma movimentação CajuPay registrada na carteira ainda.
+                              Nenhuma movimentação Mercado Pago registrada na carteira ainda.
                             </td>
                           </tr>
                         ) : (
@@ -848,7 +848,7 @@ export const CorporatePdfReportModal: React.FC<CorporatePdfReportModalProps> = (
                   ParedãoGK · E-mail: paredaogkbr@gmail.com · Suporte Oficial: (15) 98159-6443
                 </div>
                 <div className="font-mono font-bold text-[#22c55e]">
-                  CajuPay Pagamentos & Supabase Cloud
+                  Mercado Pago Pagamentos & Supabase Cloud
                 </div>
               </footer>
             </div>
