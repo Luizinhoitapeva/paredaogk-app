@@ -246,7 +246,13 @@ export async function fetchAiCacheSuggestion(
       return baseline;
     }
 
-    const data = await response.json();
+    const rawText = await response.text();
+    const trimmed = rawText.trim();
+    if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+      return baseline;
+    }
+
+    const data = JSON.parse(trimmed);
     if (data && data.success && data.suggestion) {
       const tier = getTierByTotalPrice(data.suggestion.suggestedPrice);
       return {

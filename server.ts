@@ -131,6 +131,55 @@ async function ensureQrCodeDataUrl(qrCodeText: string, existingBase64?: string |
   }
 }
 
+async function safeParseExternalJsonResponse(response: globalThis.Response): Promise<{
+  valid: boolean;
+  data: any;
+  rawText: string;
+  reason?: string;
+}> {
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  let rawText = '';
+  try {
+    rawText = await response.text();
+  } catch (err: any) {
+    return { valid: false, data: null, rawText: '', reason: err?.message || 'empty_body_read_error' };
+  }
+
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    return { valid: false, data: null, rawText: '', reason: 'empty_response_body' };
+  }
+
+  const looksLikeJson =
+    contentType.includes('application/json') ||
+    trimmed.startsWith('{') ||
+    trimmed.startsWith('[');
+
+  if (!looksLikeJson) {
+    return {
+      valid: false,
+      data: null,
+      rawText: trimmed.slice(0, 300),
+      reason: `non_json_content_type:${contentType || 'unknown'}`,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object') {
+      return { valid: false, data: null, rawText: trimmed.slice(0, 300), reason: 'invalid_json_root' };
+    }
+    return { valid: true, data: parsed, rawText: trimmed };
+  } catch (err: any) {
+    return {
+      valid: false,
+      data: null,
+      rawText: trimmed.slice(0, 300),
+      reason: err?.message || 'json_parse_error',
+    };
+  }
+}
+
 const CAJUPAY_WEBHOOK_SIGNING_SECRET =
   process.env.CAJUPAY_WEBHOOK_SECRET ||
   process.env.CAJUPAY_SECRET_KEY ||
@@ -539,12 +588,17 @@ app.post('/api/gerar-pix-caju', async (req: Request, res: Response) => {
           body: JSON.stringify(payloadCaju),
         });
 
-        if (response.ok) {
-          cajuResponse = await response.json();
+        const parsedCaju = await safeParseExternalJsonResponse(response);
+        if (response.ok && parsedCaju.valid && parsedCaju.data) {
+          cajuResponse = parsedCaju.data;
           isLiveResponse = true;
         } else {
-          const errText = await response.text();
-          console.warn('[CajuPay Live API Warning]', response.status, errText);
+          console.warn(
+            '[CajuPay Live API Warning]',
+            response.status,
+            parsedCaju.reason || 'unsuccessful_status',
+            parsedCaju.rawText
+          );
         }
       } catch (fetchErr: any) {
         console.warn('[CajuPay Fetch Warning]', fetchErr?.message);
@@ -1429,6 +1483,24 @@ Regras do JSON:
   }
 });
 
+// Garantir resposta JSON válida para rotas /api/* desconhecidas ou erros de middleware
+app.all('/api/*', (_req: Request, res: Response) => {
+  return res.status(404).json({
+    success: false,
+    error: 'Endpoint da API ParedãoGK não encontrado.',
+  });
+});
+
+app.use((err: any, req: Request, res: Response, next: express.NextFunction) => {
+  if (req.path.startsWith('/api/')) {
+    return res.status(err?.status || 500).json({
+      success: false,
+      error: err?.message || 'Erro interno no processamento da requisição.',
+    });
+  }
+  return next(err);
+});
+
 // Inicialização com Vite middlewares
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
@@ -1450,4 +1522,9 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  startServer();
+}
+
+export default app;
+

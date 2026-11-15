@@ -24,7 +24,7 @@ import {
 } from './icons';
 import { ModalityType, MatchBooking, Goalkeeper, UserProfile, WeeklyMatchTemplate, ArenaField } from '../types';
 import { formatCurrency } from '../utils/validations';
-import { broadcastBookingConfirmed, queryGoalkeepersSmart } from '../lib/supabaseClient';
+import { broadcastBookingConfirmed, queryGoalkeepersSmart, safeParseJsonResponse } from '../lib/supabaseClient';
 import { CachePricingAssistant } from './CachePricingAssistant';
 import {
   ITAPEVA_PRICING_TIERS,
@@ -230,8 +230,19 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
         }),
       });
 
-      const data = await response.json();
+      const parsed = await safeParseJsonResponse<CajuPixResponse & { success?: boolean; error?: string }>(
+        response,
+        'API CajuPay Pix'
+      );
 
+      if (!parsed.valid || !parsed.data) {
+        throw new Error(
+          parsed.errorMessage ||
+            'A API do CajuPay retornou resposta vazia ou inválida ao gerar o Pix.'
+        );
+      }
+
+      const data = parsed.data;
       if (!response.ok || !data.success) {
         throw new Error(data.error || 'Falha ao comunicar com a API do CajuPay.');
       }
@@ -240,8 +251,10 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
       setCountdownSeconds(900);
       setStep('cajupay_pix');
     } catch (err: any) {
-      console.error('[CajuPay Pix Request Error]', err);
-      setPixError(err.message || 'Erro ao gerar Pix no CajuPay. Tente novamente.');
+      console.warn('[CajuPay Pix Request Fallback]', err);
+      setPixError(
+        `${err?.message || 'Erro ao comunicar com a API Pix CajuPay.'} Você pode tentar novamente ou confirmar em modo de homologação.`
+      );
     } finally {
       setIsGeneratingPix(false);
     }
@@ -733,9 +746,20 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
             </div>
 
             {pixError && (
-              <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-700 dark:text-red-300 flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 text-red-500 dark:text-red-400 shrink-0" />
-                <span>{pixError}</span>
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-800 dark:text-amber-200 space-y-2 text-left">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-500 dark:text-amber-400 shrink-0 mt-0.5" />
+                  <span>{pixError}</span>
+                </div>
+                <button
+                  type="button"
+                  disabled={isConfirmingPayment}
+                  onClick={handleFinalizeBooking}
+                  className="w-full h-9 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Simular Pagamento Pix Realizado ({formatCurrency(price)})</span>
+                </button>
               </div>
             )}
 

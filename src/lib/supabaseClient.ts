@@ -69,6 +69,97 @@ export function getAuthRedirectUrl(): string {
 }
 
 /**
+ * Valida rigorosamente a resposta HTTP antes de executar o parse JSON,
+ * prevenindo erros como "Unexpected end of JSON input" quando o endpoint
+ * retorna corpo vazio, HTML de fallback ou erro de gateway.
+ */
+export async function safeParseJsonResponse<T = any>(
+  response: Response,
+  contextLabel = 'API CajuPay'
+): Promise<{
+  valid: boolean;
+  data: T | null;
+  rawText: string;
+  errorMessage?: string;
+}> {
+  let rawText = '';
+  try {
+    rawText = await response.text();
+  } catch (err: any) {
+    return {
+      valid: false,
+      data: null,
+      rawText: '',
+      errorMessage: `Não foi possível ler a resposta de ${contextLabel}: ${err?.message || 'erro de leitura'}.`,
+    };
+  }
+
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    return {
+      valid: false,
+      data: null,
+      rawText: '',
+      errorMessage: `${contextLabel} retornou uma resposta vazia (HTTP ${response.status}).`,
+    };
+  }
+
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  const isHtmlFallback =
+    contentType.includes('text/html') ||
+    trimmed.startsWith('<!') ||
+    trimmed.toLowerCase().startsWith('<html');
+
+  if (isHtmlFallback) {
+    return {
+      valid: false,
+      data: null,
+      rawText: trimmed.slice(0, 200),
+      errorMessage: `${contextLabel} respondeu HTML em vez de JSON (HTTP ${response.status}). Verifique o roteamento /api/*.`,
+    };
+  }
+
+  const looksLikeJson =
+    contentType.includes('application/json') ||
+    contentType.includes('+json') ||
+    trimmed.startsWith('{') ||
+    trimmed.startsWith('[');
+
+  if (!looksLikeJson) {
+    return {
+      valid: false,
+      data: null,
+      rawText: trimmed.slice(0, 200),
+      errorMessage: `${contextLabel} retornou conteúdo inválido não-JSON (HTTP ${response.status}).`,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed === null || typeof parsed !== 'object') {
+      return {
+        valid: false,
+        data: null,
+        rawText: trimmed.slice(0, 200),
+        errorMessage: `${contextLabel} retornou JSON com estrutura inesperada.`,
+      };
+    }
+    return {
+      valid: true,
+      data: parsed as T,
+      rawText: trimmed,
+    };
+  } catch {
+    return {
+      valid: false,
+      data: null,
+      rawText: trimmed.slice(0, 200),
+      errorMessage: `Resposta JSON malformada recebida de ${contextLabel} (HTTP ${response.status}).`,
+    };
+  }
+}
+
+/**
  * Dispara requisição para a rota de e-mail de boas-vindas
  */
 export async function sendWelcomeEmailNotification(payload: {
@@ -83,7 +174,11 @@ export async function sendWelcomeEmailNotification(payload: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    return await res.json();
+    const parsed = await safeParseJsonResponse(res, 'Serviço de E-mail');
+    if (!parsed.valid || !parsed.data) {
+      return { success: false, error: parsed.errorMessage || 'Resposta inválida do serviço de e-mail' };
+    }
+    return parsed.data;
   } catch (error) {
     console.warn('[ParedãoGK Email Notification warning]', error);
     return { success: false, error: 'Falha ao notificar serviço de e-mail' };
@@ -1374,25 +1469,42 @@ export async function generateCajuPayPixCharge(params: {
     headers['X-CajuPay-Public-Key'] = publicKey;
   }
 
-  const response = await fetch('/api/gerar-pix-caju', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      amount: params.amount,
-      valor: params.amount,
-      userId: params.userId && params.userId !== 'usr-guest' ? params.userId : undefined,
-      type: params.type || 'wallet_deposit',
-      matchId: params.matchId,
-      description: params.description || `Recarga Carteira Digital ParedãoGK - R$ ${params.amount.toFixed(2)}`,
-      customer: params.customer,
-    }),
-  });
-
-  const data = await response.json();
-  if (!response.ok || !data?.success) {
-    throw new Error(data?.error || 'Falha ao gerar cobrança Pix no CajuPay.');
+  let response: Response;
+  try {
+    response = await fetch('/api/gerar-pix-caju', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        amount: params.amount,
+        valor: params.amount,
+        userId: params.userId && params.userId !== 'usr-guest' ? params.userId : undefined,
+        type: params.type || 'wallet_deposit',
+        matchId: params.matchId,
+        description: params.description || `Recarga Carteira Digital ParedãoGK - R$ ${params.amount.toFixed(2)}`,
+        customer: params.customer,
+      }),
+    });
+  } catch (networkErr: any) {
+    throw new Error(
+      networkErr?.message
+        ? `Falha de conexão com o servidor Pix CajuPay (${networkErr.message}).`
+        : 'Não foi possível conectar ao servidor Pix CajuPay.'
+    );
   }
-  return data as CajuPayPixChargeResponse;
+
+  const parsed = await safeParseJsonResponse<CajuPayPixChargeResponse>(response, 'API CajuPay Pix');
+  if (!parsed.valid || !parsed.data) {
+    throw new Error(
+      parsed.errorMessage ||
+        'A API do CajuPay retornou uma resposta inválida ou vazia ao gerar o Pix.'
+    );
+  }
+
+  const data = parsed.data;
+  if (!response.ok || !data?.success) {
+    throw new Error(data?.error || `Falha ao gerar cobrança Pix no CajuPay (HTTP ${response.status}).`);
+  }
+  return data;
 }
 
 /**
@@ -1406,7 +1518,9 @@ export async function checkCajuPayPaymentStatus(paymentId: string): Promise<{
   try {
     const res = await fetch(`/api/cajupay/payment-status/${encodeURIComponent(paymentId)}`);
     if (!res.ok) return { status: 'pending' };
-    const json = await res.json();
+    const parsed = await safeParseJsonResponse(res, 'Status Pix CajuPay');
+    if (!parsed.valid || !parsed.data) return { status: 'pending' };
+    const json = parsed.data;
     return {
       status: json?.charge?.status || 'pending',
       receiptCode: json?.charge?.receiptCode,
@@ -1433,18 +1547,32 @@ export async function simulateCajuPayWebhookConfirmation(params: {
   supabaseCredited: boolean;
   newWalletBalance?: number;
 }> {
-  const res = await fetch('/api/cajupay/simulate-webhook', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      paymentId: params.paymentId,
-      amount: params.amount,
-      userId: params.userId && params.userId !== 'usr-guest' ? params.userId : undefined,
-      description: params.description,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch('/api/cajupay/simulate-webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        paymentId: params.paymentId,
+        amount: params.amount,
+        userId: params.userId && params.userId !== 'usr-guest' ? params.userId : undefined,
+        description: params.description,
+      }),
+    });
+  } catch (networkErr: any) {
+    throw new Error(
+      networkErr?.message || 'Falha de rede ao comunicar com o webhook de homologação CajuPay.'
+    );
+  }
 
-  const data = await res.json();
+  const parsed = await safeParseJsonResponse(res, 'Webhook Simulação CajuPay');
+  if (!parsed.valid || !parsed.data) {
+    throw new Error(
+      parsed.errorMessage || 'Resposta vazia ou inválida ao confirmar pagamento no webhook CajuPay.'
+    );
+  }
+
+  const data = parsed.data;
   if (!res.ok || !data?.success) {
     throw new Error(data?.error || 'Falha ao confirmar pagamento via webhook CajuPay.');
   }
@@ -2487,7 +2615,8 @@ export async function fetchCajuPayWebhookConfigAndLogs(defaultEndpointUrl: strin
   try {
     const res = await fetch('/api/admin/cajupay-webhooks');
     if (res.ok) {
-      const json = await res.json();
+      const parsed = await safeParseJsonResponse(res, 'Admin Webhooks CajuPay');
+      const json = parsed.valid ? parsed.data : null;
       if (json?.config) {
         config = {
           id: json.config.id || config.id,
@@ -2661,7 +2790,8 @@ export async function dispatchCajuPayWebhookTest(params: {
       body: JSON.stringify(params),
     });
     if (res.ok) {
-      const json = await res.json();
+      const parsed = await safeParseJsonResponse(res, 'Teste Webhook CajuPay');
+      const json = parsed.valid ? parsed.data : null;
       if (json?.log) {
         log = json.log as CajuPayWebhookLog;
       }
