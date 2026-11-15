@@ -585,8 +585,11 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       valor,
       description,
       customer,
+      user: bodyUser,
       matchId,
       userId,
+      publicKey: bodyPublicKey,
+      mercadoPagoPublicKey,
       type = 'wallet_deposit',
       expiresIn = 1800,
     } = req.body || {};
@@ -603,8 +606,14 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
     const houseFee = 5;
     const goalkeeperNet = Math.max(0, Number((paymentAmount - houseFee).toFixed(2)));
     const idempotencyKey = crypto.randomUUID();
-    const clientPublicKey = req.headers['x-mercadopago-public-key'] as string | undefined;
+    const clientPublicKey =
+      (req.headers['x-mercadopago-public-key'] as string | undefined) ||
+      (typeof bodyPublicKey === 'string' ? bodyPublicKey : undefined) ||
+      (typeof mercadoPagoPublicKey === 'string' ? mercadoPagoPublicKey : undefined);
     const { publicKey, accessToken, isLiveConfigured } = getMercadoPagoCredentials(clientPublicKey);
+
+    const resolvedCustomer = customer || bodyUser || {};
+    const resolvedUserId = userId || bodyUser?.id;
 
     const effectiveWebhookUrl =
       runtimeWebhookConfig.webhookUrl && !runtimeWebhookConfig.webhookUrl.startsWith('/')
@@ -622,11 +631,11 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
         ? `Recarga Carteira Digital ParedãoGK - R$ ${paymentAmount.toFixed(2)}`
         : `Convocação Goleiro ParedãoGK - Partida #${matchId || Date.now()}`);
 
-    const fullName = String(customer?.name || 'Contratante ParedãoGK').trim();
+    const fullName = String(resolvedCustomer?.name || 'Contratante ParedãoGK').trim();
     const nameParts = fullName.split(/\s+/);
     const firstName = nameParts[0] || 'Contratante';
     const lastName = nameParts.slice(1).join(' ') || 'ParedãoGK';
-    const cleanCpf = String(customer?.cpf || '').replace(/\D/g, '');
+    const cleanCpf = String(resolvedCustomer?.cpf || '').replace(/\D/g, '');
     const expirationDateIso = new Date(Date.now() + Math.max(300, Number(expiresIn) || 1800) * 1000).toISOString();
 
     const payloadMercadoPago: Record<string, any> = {
@@ -636,9 +645,9 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       date_of_expiration: expirationDateIso,
       external_reference:
         matchId ||
-        (userId ? `wallet_${userId}_${Date.now()}` : `pgk_${Date.now()}`),
+        (resolvedUserId ? `wallet_${resolvedUserId}_${Date.now()}` : `pgk_${Date.now()}`),
       payer: {
-        email: customer?.email || 'paredaogkbr@gmail.com',
+        email: resolvedCustomer?.email || 'paredaogkbr@gmail.com',
         first_name: firstName,
         last_name: lastName,
         ...(cleanCpf.length === 11
@@ -653,7 +662,7 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       metadata: {
         platform: 'ParedaoGK',
         type,
-        user_id: userId || undefined,
+        user_id: resolvedUserId || undefined,
         match_id: matchId || (type === 'match_booking' ? `mtch-${Date.now()}` : undefined),
         public_key_ref: publicKey ? `${publicKey.slice(0, 10)}...` : undefined,
       },
@@ -678,6 +687,7 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
             'User-Agent': 'ParedaoGK-App/3.0',
           },
           body: JSON.stringify(payloadMercadoPago),
+          signal: AbortSignal.timeout(12000),
         });
 
         const parsedMp = await safeParseExternalJsonResponse(response);

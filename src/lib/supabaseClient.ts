@@ -1462,35 +1462,90 @@ export async function generateMercadoPagoPixCharge(params: {
     phone?: string;
   };
 }): Promise<MercadoPagoPixChargeResponse> {
-  const publicKey = import.meta.env.VITE_MERCADOPAGO_PUBLIC_KEY || '';
+  const rawPublicKey = (import.meta.env.VITE_MERCADOPAGO_PUBLIC_KEY || '').trim();
+  const publicKey =
+    rawPublicKey && !rawPublicKey.startsWith('MY_') && !rawPublicKey.includes('placeholder')
+      ? rawPublicKey
+      : '';
+
+  // Recuperar dados reais do usuário logado via Supabase Auth
+  let authUserId = params.userId && params.userId !== 'usr-guest' ? params.userId : undefined;
+  let authEmail = params.customer?.email || '';
+  let authName = params.customer?.name || '';
+  let authPhone = params.customer?.phone || '';
+  let authCpf = params.customer?.cpf || '';
+
+  if (isSupabaseConfigured) {
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (session?.user) {
+        authUserId = authUserId || session.user.id;
+        authEmail = authEmail || session.user.email || '';
+        authName =
+          authName ||
+          (session.user.user_metadata?.full_name as string) ||
+          (session.user.user_metadata?.name as string) ||
+          '';
+        authPhone = authPhone || (session.user.user_metadata?.phone as string) || '';
+        authCpf = authCpf || (session.user.user_metadata?.cpf as string) || '';
+      }
+    } catch {
+      // Prosseguir com os dados do perfil em sessão se getSession falhar
+    }
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  if (publicKey && !publicKey.startsWith('MY_') && !publicKey.includes('placeholder')) {
+  if (publicKey) {
     headers['X-MercadoPago-Public-Key'] = publicKey;
   }
+
+  const resolvedCustomer = {
+    name: authName || 'Atleta ParedãoGK',
+    email: authEmail || 'paredaogkbr@gmail.com',
+    cpf: authCpf || '',
+    phone: authPhone || '',
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
 
   let response: Response;
   try {
     response = await fetch('/api/gerar-pix-mercadopago', {
       method: 'POST',
       headers,
+      signal: controller.signal,
       body: JSON.stringify({
         amount: params.amount,
         valor: params.amount,
-        userId: params.userId && params.userId !== 'usr-guest' ? params.userId : undefined,
+        publicKey: publicKey || undefined,
+        userId: authUserId,
         type: params.type || 'wallet_deposit',
         matchId: params.matchId,
-        description: params.description || `Recarga Carteira Digital ParedãoGK - R$ ${params.amount.toFixed(2)}`,
-        customer: params.customer,
+        description:
+          params.description || `Recarga Carteira Digital ParedãoGK - R$ ${params.amount.toFixed(2)}`,
+        user: {
+          id: authUserId,
+          ...resolvedCustomer,
+        },
+        customer: resolvedCustomer,
       }),
     });
   } catch (networkErr: any) {
+    if (networkErr?.name === 'AbortError') {
+      throw new Error('Timeout de rede ao aguardar resposta da API Pix do Mercado Pago.');
+    }
     throw new Error(
       networkErr?.message
         ? `Falha de conexão com o servidor Pix Mercado Pago (${networkErr.message}).`
         : 'Não foi possível conectar ao servidor Pix Mercado Pago.'
     );
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   const parsed = await safeParseJsonResponse<MercadoPagoPixChargeResponse>(
@@ -1508,6 +1563,11 @@ export async function generateMercadoPagoPixCharge(params: {
   if (!response.ok || !data?.success) {
     throw new Error(data?.error || `Falha ao gerar cobrança Pix no Mercado Pago (HTTP ${response.status}).`);
   }
+
+  if (data.qrCodeBase64 && !data.qrCodeBase64.startsWith('data:image')) {
+    data.qrCodeBase64 = `data:image/png;base64,${data.qrCodeBase64}`;
+  }
+
   return data;
 }
 

@@ -218,7 +218,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
         setMpPixCharge(null);
         const detail = err?.message ? ` (${err.message})` : '';
         setPixGenerationError(
-          `Não foi possível gerar o QR Code dinâmico na API do Mercado Pago no momento${detail}. Você pode tentar novamente ou clicar em "Simular Pagamento Pix Realizado" abaixo para homologação imediata.`
+          `Não foi possível gerar o QR Code dinâmico na API do Mercado Pago no momento${detail}. Utilize o botão de homologação abaixo como fallback ou tente novamente.`
         );
       } finally {
         setIsGeneratingPix(false);
@@ -226,6 +226,8 @@ export const WalletTab: React.FC<WalletTabProps> = ({
     },
     [user.id, user.name, user.email, user.cpf, user.phone]
   );
+
+  const [isCheckingStatus, setIsCheckingStatus] = useState(false);
 
   const finalizeConfirmedPixDeposit = React.useCallback(
     async (params: { paymentId: string; amount: number; receiptCode: string }) => {
@@ -255,6 +257,23 @@ export const WalletTab: React.FC<WalletTabProps> = ({
     },
     [user.id, user.walletBalance, user.cashbackBalance, onUpdateBalance]
   );
+
+  const handleManualCheckPixStatus = React.useCallback(async () => {
+    if (!mpPixCharge || depositSuccessInfo) return;
+    setIsCheckingStatus(true);
+    try {
+      const statusRes = await checkMercadoPagoPaymentStatus(mpPixCharge.id);
+      if (statusRes.status === 'completed') {
+        await finalizeConfirmedPixDeposit({
+          paymentId: mpPixCharge.id,
+          amount: mpPixCharge.amount,
+          receiptCode: statusRes.receiptCode || generateReceiptCode(),
+        });
+      }
+    } finally {
+      setIsCheckingStatus(false);
+    }
+  }, [mpPixCharge, depositSuccessInfo, finalizeConfirmedPixDeposit]);
 
   // Gerar cobrança Pix no Mercado Pago automaticamente ao abrir o modal
   React.useEffect(() => {
@@ -954,7 +973,11 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                     </div>
                   ) : mpPixCharge?.qrCodeBase64 ? (
                     <img
-                      src={mpPixCharge.qrCodeBase64}
+                      src={
+                        mpPixCharge.qrCodeBase64.startsWith('data:image')
+                          ? mpPixCharge.qrCodeBase64
+                          : `data:image/png;base64,${mpPixCharge.qrCodeBase64}`
+                      }
                       alt={`QR Code Pix Mercado Pago R$ ${depositAmount}`}
                       className="w-full h-full object-contain"
                     />
@@ -964,10 +987,10 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                         <QrCode className="w-6 h-6" />
                       </div>
                       <span className="text-[11px] font-bold text-slate-800 leading-tight">
-                        API Pix indisponível
+                        Timeout / API indisponível
                       </span>
                       <span className="text-[10px] text-slate-500 leading-snug">
-                        Homologação liberada no botão abaixo
+                        Fallback de homologação liberado abaixo
                       </span>
                     </div>
                   ) : (
@@ -982,7 +1005,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                   <div className="truncate text-slate-600 dark:text-slate-400 text-[11px] font-mono select-all flex-1">
                     {isGeneratingPix
                       ? 'Gerando código Pix Copia e Cola...'
-                      : mpPixCharge?.qrCodeText || 'Modo homologação ativo (sem QR externo)'}
+                      : mpPixCharge?.qrCodeText || 'Aguardando geração do Pix Copia e Cola...'}
                   </div>
                   <button
                     type="button"
@@ -1000,27 +1023,48 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                 </div>
 
                 {mpPixCharge && (
-                  <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-ping" />
-                    <span>Aguardando confirmação automática do webhook Mercado Pago...</span>
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-ping" />
+                      <span>Aguardando confirmação automática do webhook Mercado Pago...</span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleManualCheckPixStatus}
+                      disabled={isCheckingStatus || isConfirmingDeposit}
+                      className="w-full h-10 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-700 dark:text-[#38bdf8] font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      {isCheckingStatus ? 'Verificando no Mercado Pago...' : 'Já realizei o Pix · Verificar Confirmação'}
+                    </button>
                   </div>
                 )}
 
-                <button
-                  type="button"
-                  onClick={handleConfirmDeposit}
-                  disabled={isConfirmingDeposit || isGeneratingPix}
-                  className="w-full h-12 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition-all cursor-pointer disabled:opacity-50"
-                >
-                  {isConfirmingDeposit ? (
-                    <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
-                  ) : (
-                    <>
-                      <Check className="w-4 h-4" />
-                      <span>Simular Pagamento Pix Realizado (+R$ {depositAmount})</span>
-                    </>
-                  )}
-                </button>
+                {/* Botão verde de simulação exibido apenas como fallback limpo em caso de erro/timeout de rede ou modo homologação */}
+                {(Boolean(pixGenerationError) || mpPixCharge?.provider === 'mercadopago-sandbox') && (
+                  <div className="pt-1 space-y-1.5">
+                    <button
+                      type="button"
+                      onClick={handleConfirmDeposit}
+                      disabled={isConfirmingDeposit || isGeneratingPix}
+                      className="w-full h-12 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      {isConfirmingDeposit ? (
+                        <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <>
+                          <Check className="w-4 h-4" />
+                          <span>Simular Pagamento Pix Realizado (+R$ {depositAmount})</span>
+                        </>
+                      )}
+                    </button>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                      {pixGenerationError
+                        ? 'Fallback de homologação ativo devido a falha/timeout na comunicação de rede.'
+                        : 'Ambiente em modo homologação: confirme acima para validar o crédito no Supabase.'}
+                    </p>
+                  </div>
+                )}
               </>
             )}
           </motion.div>

@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/api/gerar-pix-mercadopago",
+      "destination": "/api/gerar-pix-mercadopago"
+    },
+    {
       "source": "/api/webhook-mercadopago",
       "destination": "/api/webhook-mercadopago"
     },
