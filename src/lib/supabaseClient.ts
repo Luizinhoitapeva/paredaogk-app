@@ -1632,9 +1632,16 @@ export async function generateMercadoPagoPixCharge(params: {
     );
   }
 
-  const data = parsed.data;
+  const data = parsed.data as MercadoPagoPixChargeResponse & {
+    mpCauses?: Array<{ code?: string | number; description?: string }>;
+  };
   if (!response.ok || !data?.success) {
-    throw new Error(data?.error || `Falha ao gerar cobrança Pix no Mercado Pago (HTTP ${response.status}).`);
+    const firstCause = Array.isArray(data?.mpCauses) && data.mpCauses.length > 0
+      ? ` [${data.mpCauses.map((c) => c.description || c.code).filter(Boolean).join('; ')}]`
+      : '';
+    throw new Error(
+      `${data?.error || `Falha ao gerar cobrança Pix no Mercado Pago (HTTP ${response.status}).`}${firstCause}`
+    );
   }
 
   const rawQrText =

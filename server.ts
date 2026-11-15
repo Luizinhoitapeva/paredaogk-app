@@ -15,9 +15,13 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
+function cleanEnvSecret(val?: string): string {
+  if (!val) return '';
+  return val.trim().replace(/^["']|["']$/g, '').trim();
+}
+
 function isPlaceholderSecret(val?: string): boolean {
-  if (!val) return true;
-  const trimmed = val.trim();
+  const trimmed = cleanEnvSecret(val);
   return (
     !trimmed ||
     trimmed.startsWith('MY_') ||
@@ -27,25 +31,36 @@ function isPlaceholderSecret(val?: string): boolean {
 }
 
 function getMercadoPagoCredentials(clientPublicKey?: string) {
-  const envPublicKey =
-    process.env.VITE_MERCADOPAGO_PUBLIC_KEY ||
-    process.env.MERCADOPAGO_PUBLIC_KEY ||
-    '';
+  const envPublicKey = cleanEnvSecret(
+    process.env.VITE_MERCADOPAGO_PUBLIC_KEY || process.env.MERCADOPAGO_PUBLIC_KEY || ''
+  );
+  const cleanClientPublicKey = cleanEnvSecret(clientPublicKey);
   const publicKey = !isPlaceholderSecret(envPublicKey)
-    ? envPublicKey.trim()
-    : !isPlaceholderSecret(clientPublicKey)
-    ? String(clientPublicKey).trim()
+    ? envPublicKey
+    : !isPlaceholderSecret(cleanClientPublicKey)
+    ? cleanClientPublicKey
     : '';
 
-  const envAccessToken =
-    process.env.MERCADOPAGO_ACCESS_TOKEN ||
-    '';
-  const accessToken = !isPlaceholderSecret(envAccessToken) ? envAccessToken.trim() : '';
+  const envAccessToken = cleanEnvSecret(
+    process.env.MERCADOPAGO_ACCESS_TOKEN || process.env.MP_ACCESS_TOKEN || ''
+  );
+  const accessToken = !isPlaceholderSecret(envAccessToken) ? envAccessToken : '';
+  const isTestToken = /^TEST-/i.test(accessToken);
+  const isProductionToken = /^APP_USR-/i.test(accessToken);
 
   return {
     publicKey,
     accessToken,
     isLiveConfigured: Boolean(accessToken),
+    isTestToken,
+    isProductionToken,
+    tokenMode: isTestToken
+      ? ('test' as const)
+      : isProductionToken
+      ? ('production' as const)
+      : accessToken
+      ? ('custom' as const)
+      : ('missing' as const),
   };
 }
 
@@ -623,10 +638,89 @@ app.get('/api/health', (_req: Request, res: Response) => {
   });
 });
 
+const MERCADOPAGO_PAYMENTS_PRODUCTION_URL = 'https://api.mercadopago.com/v1/payments';
+
+function maskEmailForLog(email: string): string {
+  const [local, domain] = email.split('@');
+  if (!local || !domain) return '***';
+  return `${local.slice(0, 2)}***@${domain}`;
+}
+
+function validateMercadoPagoProductionPixPayload(params: {
+  headers: Record<string, string>;
+  payload: Record<string, any>;
+}): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const { headers, payload } = params;
+
+  if (!headers['Authorization'] || !headers['Authorization'].startsWith('Bearer ')) {
+    errors.push('Cabeçalho Authorization Bearer ausente ou inválido.');
+  }
+  if (!headers['X-Idempotency-Key'] || headers['X-Idempotency-Key'].trim().length < 4) {
+    errors.push('Cabeçalho X-Idempotency-Key ausente ou inválido.');
+  }
+  if (headers['Content-Type'] !== 'application/json') {
+    errors.push('Cabeçalho Content-Type deve ser application/json.');
+  }
+
+  if (payload.payment_method_id !== 'pix') {
+    errors.push("Campo payment_method_id deve ser estritamente 'pix'.");
+  }
+  if (
+    typeof payload.transaction_amount !== 'number' ||
+    !Number.isFinite(payload.transaction_amount) ||
+    payload.transaction_amount < 0.01
+  ) {
+    errors.push('Campo transaction_amount inválido (deve ser numérico >= 0.01).');
+  }
+  if (typeof payload.description !== 'string' || payload.description.trim().length < 3) {
+    errors.push('Campo description obrigatório e deve conter descrição clara da cobrança.');
+  }
+  if (typeof payload.external_reference !== 'string' || !payload.external_reference.trim()) {
+    errors.push('Campo external_reference não pode ser vazio.');
+  }
+  if (
+    typeof payload.date_of_expiration !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/.test(payload.date_of_expiration)
+  ) {
+    errors.push('Campo date_of_expiration deve seguir ISO-8601 com fuso horário (ex: -03:00).');
+  }
+
+  const payer = payload.payer;
+  if (!payer || typeof payer !== 'object') {
+    errors.push('Objeto payer obrigatório ausente.');
+  } else {
+    if (typeof payer.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payer.email)) {
+      errors.push('Campo payer.email obrigatório e válido.');
+    }
+    if (typeof payer.first_name !== 'string' || !payer.first_name.trim()) {
+      errors.push('Campo payer.first_name não pode estar vazio.');
+    }
+    if (typeof payer.last_name !== 'string' || !payer.last_name.trim()) {
+      errors.push('Campo payer.last_name não pode estar vazio.');
+    }
+    if (payer.identification !== undefined) {
+      if (
+        !payer.identification ||
+        payer.identification.type !== 'CPF' ||
+        !isValidBrazilianCpf(String(payer.identification.number || ''))
+      ) {
+        errors.push('Campo payer.identification.number inválido ou vazio.');
+      }
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
 /**
  * 1. Rota de API: /api/gerar-pix-mercadopago
- * Gera cobrança Pix dinâmica via API oficial do Mercado Pago (POST https://api.mercadopago.com/v1/payments)
- * utilizando VITE_MERCADOPAGO_PUBLIC_KEY, MERCADOPAGO_ACCESS_TOKEN e dados reais do pagador autenticado.
+ * Força chamadas ao endpoint real de produção do Mercado Pago (POST https://api.mercadopago.com/v1/payments)
+ * sem fallback para sandbox quando configurado ou em ambiente de produção, validando cabeçalhos,
+ * payload Pix e dados reais do pagador autenticado para evitar erros [QRCD10] / [QR104DES].
  */
 async function handleGerarPixMercadoPago(req: Request, res: Response) {
   try {
@@ -673,7 +767,62 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       (req.headers['x-mercadopago-public-key'] as string | undefined) ||
       (typeof bodyPublicKey === 'string' ? bodyPublicKey : undefined) ||
       (typeof mercadoPagoPublicKey === 'string' ? mercadoPagoPublicKey : undefined);
-    const { publicKey, accessToken, isLiveConfigured } = getMercadoPagoCredentials(clientPublicKey);
+    const {
+      publicKey,
+      accessToken,
+      isLiveConfigured,
+      isTestToken,
+      tokenMode,
+    } = getMercadoPagoCredentials(clientPublicKey);
+
+    const isVercelOrProductionEnv =
+      process.env.VERCEL === '1' ||
+      Boolean(process.env.VERCEL_ENV) ||
+      process.env.NODE_ENV === 'production';
+
+    if (isTestToken) {
+      console.error('[Mercado Pago Pix Production Guard]', {
+        timestamp: new Date().toISOString(),
+        reason: 'TEST_TOKEN_REJECTED',
+        tokenMode,
+        tokenPrefix: accessToken.slice(0, 12),
+        publicKeyConfigured: Boolean(publicKey),
+        vercelEnv: process.env.VERCEL_ENV || process.env.NODE_ENV || 'local',
+        message:
+          'MERCADOPAGO_ACCESS_TOKEN inicia com TEST- (sandbox/homologação). Isso gera QR Code de teste [QR104DES]. Substitua pelo token de PRODUÇÃO (APP_USR-...).',
+      });
+      return res.status(400).json({
+        success: false,
+        provider: 'mercadopago',
+        error:
+          'Credencial de TESTE/HOMOLOGAÇÃO (TEST-...) detectada em MERCADOPAGO_ACCESS_TOKEN. Configure o Access Token de PRODUÇÃO (APP_USR-...) para emitir Pix válido sem o erro [QR104DES].',
+        tokenMode,
+        idempotencyKey,
+        publicKeyConfigured: Boolean(publicKey),
+        accessTokenConfigured: true,
+      });
+    }
+
+    if (!isLiveConfigured && isVercelOrProductionEnv) {
+      console.error('[Mercado Pago Pix Production Guard]', {
+        timestamp: new Date().toISOString(),
+        reason: 'MISSING_ACCESS_TOKEN_IN_PRODUCTION',
+        vercelEnv: process.env.VERCEL_ENV || process.env.NODE_ENV,
+        publicKeyConfigured: Boolean(publicKey),
+        message:
+          'MERCADOPAGO_ACCESS_TOKEN não configurado nas variáveis de ambiente de produção/Vercel.',
+      });
+      return res.status(500).json({
+        success: false,
+        provider: 'mercadopago',
+        error:
+          'MERCADOPAGO_ACCESS_TOKEN não configurado no ambiente de produção. Adicione o token APP_USR-... nas variáveis de ambiente da Vercel.',
+        tokenMode: 'missing',
+        idempotencyKey,
+        publicKeyConfigured: Boolean(publicKey),
+        accessTokenConfigured: false,
+      });
+    }
 
     // Resolver usuário autenticado via Bearer JWT do Supabase (se disponível)
     let authSessionUser: {
@@ -751,14 +900,15 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
     const rawFullName = String(authSessionUser.name || rawBodyName || '').trim();
     const cleanedFullName = rawFullName.replace(/\s+/g, ' ').trim();
     const nameParts = cleanedFullName ? cleanedFullName.split(' ') : [];
+    const emailAlias = resolvedEmail.split('@')[0].replace(/[^a-zA-Z0-9]/g, '') || 'Atleta';
     const firstName = (
-      String(requestCustomer?.first_name || nameParts[0] || resolvedEmail.split('@')[0] || 'Atleta').trim()
+      String(requestCustomer?.first_name || nameParts[0] || emailAlias).trim() || 'Atleta'
     ).slice(0, 60);
     const lastName = (
       String(
         requestCustomer?.last_name ||
-          (nameParts.length > 1 ? nameParts.slice(1).join(' ') : firstName)
-      ).trim()
+          (nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'ParedaoGK')
+      ).trim() || 'ParedaoGK'
     ).slice(0, 60);
 
     const rawCpf = String(
@@ -842,23 +992,65 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
     let liveApiStatus = 0;
     let liveApiErrorMessage = '';
     let liveApiCauses: any[] | undefined;
+    let mpResponseRequestId = '';
 
     if (isLiveConfigured) {
-      try {
-        const response = await fetch('https://api.mercadopago.com/v1/payments', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-            'X-Idempotency-Key': idempotencyKey,
-            'User-Agent': 'ParedaoGK-App/3.0',
+      const mpHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        'X-Idempotency-Key': idempotencyKey,
+        'User-Agent': 'ParedaoGK-App/3.0',
+      };
+
+      const validationCheck = validateMercadoPagoProductionPixPayload({
+        headers: mpHeaders,
+        payload: payloadMercadoPago,
+      });
+
+      if (!validationCheck.valid) {
+        console.error('[Mercado Pago Pix Payload Validation Failed]', {
+          timestamp: new Date().toISOString(),
+          endpoint: MERCADOPAGO_PAYMENTS_PRODUCTION_URL,
+          idempotencyKey,
+          errors: validationCheck.errors,
+          payloadSummary: {
+            transaction_amount: payloadMercadoPago.transaction_amount,
+            payment_method_id: payloadMercadoPago.payment_method_id,
+            descriptionLength: String(payloadMercadoPago.description || '').length,
+            date_of_expiration: payloadMercadoPago.date_of_expiration,
+            external_reference: payloadMercadoPago.external_reference,
+            payer: {
+              email: maskEmailForLog(resolvedEmail),
+              first_name: firstName,
+              last_name: lastName,
+              hasCpf: Boolean(validCpf),
+            },
           },
+        });
+        return res.status(400).json({
+          success: false,
+          provider: 'mercadopago',
+          error: `Payload Pix inválido para produção do Mercado Pago: ${validationCheck.errors.join(' ')}`,
+          validationErrors: validationCheck.errors,
+          idempotencyKey,
+          publicKeyConfigured: Boolean(publicKey),
+          accessTokenConfigured: true,
+        });
+      }
+
+      try {
+        const response = await fetch(MERCADOPAGO_PAYMENTS_PRODUCTION_URL, {
+          method: 'POST',
+          headers: mpHeaders,
           body: JSON.stringify(payloadMercadoPago),
           signal: AbortSignal.timeout(12000),
         });
 
         liveApiStatus = response.status;
+        mpResponseRequestId = response.headers.get('x-request-id') || '';
         const parsedMp = await safeParseExternalJsonResponse(response);
+
         if (response.ok && parsedMp.valid && parsedMp.data) {
           mpResponse = parsedMp.data;
           isLiveResponse = true;
@@ -868,18 +1060,51 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
             parsedMp.data?.message ||
             parsedMp.data?.error ||
             parsedMp.reason ||
-            `HTTP ${response.status}`;
-          console.warn(
-            '[Mercado Pago Live API Error]',
-            response.status,
-            liveApiErrorMessage,
-            parsedMp.rawText
-          );
+            `HTTP ${response.status} ${response.statusText || ''}`.trim();
+
+          console.error('[Mercado Pago Production API Rejection]', {
+            timestamp: new Date().toISOString(),
+            endpoint: MERCADOPAGO_PAYMENTS_PRODUCTION_URL,
+            httpStatus: response.status,
+            httpStatusText: response.statusText,
+            mpRequestId: mpResponseRequestId || undefined,
+            idempotencyKey,
+            tokenMode,
+            tokenMask: `${accessToken.slice(0, 12)}...${accessToken.slice(-4)}`,
+            publicKeyConfigured: Boolean(publicKey),
+            requestPayloadSummary: {
+              transaction_amount: payloadMercadoPago.transaction_amount,
+              payment_method_id: payloadMercadoPago.payment_method_id,
+              description: payloadMercadoPago.description,
+              date_of_expiration: payloadMercadoPago.date_of_expiration,
+              external_reference: payloadMercadoPago.external_reference,
+              notification_url: payloadMercadoPago.notification_url || null,
+              payer: {
+                email: maskEmailForLog(resolvedEmail),
+                first_name: firstName,
+                last_name: lastName,
+                hasCpf: Boolean(validCpf),
+              },
+              metadata: payloadMercadoPago.metadata,
+            },
+            mpErrorMessage: liveApiErrorMessage,
+            mpErrorCode: parsedMp.data?.error || undefined,
+            mpCauses: liveApiCauses || null,
+            mpRawResponse: parsedMp.rawText,
+          });
         }
       } catch (fetchErr: any) {
         liveApiStatus = 502;
         liveApiErrorMessage = fetchErr?.message || 'network_error';
-        console.warn('[Mercado Pago Fetch Error]', liveApiErrorMessage);
+        console.error('[Mercado Pago Production Fetch Exception]', {
+          timestamp: new Date().toISOString(),
+          endpoint: MERCADOPAGO_PAYMENTS_PRODUCTION_URL,
+          idempotencyKey,
+          tokenMode,
+          errorName: fetchErr?.name || 'Error',
+          errorMessage: liveApiErrorMessage,
+          stack: fetchErr?.stack,
+        });
       }
     }
 
@@ -889,9 +1114,11 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       return res.status(liveApiStatus >= 400 && liveApiStatus < 600 ? liveApiStatus : 502).json({
         success: false,
         provider: 'mercadopago',
-        error: `Falha ao criar pagamento Pix no Mercado Pago: ${liveApiErrorMessage || 'resposta inválida'}.`,
+        error: `Rejeição da API de produção do Mercado Pago: ${liveApiErrorMessage || 'resposta inválida'}.`,
         mpStatus: liveApiStatus || 502,
+        mpRequestId: mpResponseRequestId || undefined,
         mpCauses: liveApiCauses,
+        tokenMode,
         idempotencyKey,
         publicKeyConfigured: Boolean(publicKey),
         accessTokenConfigured: true,
@@ -900,6 +1127,7 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
 
     if (isLiveResponse && mpResponse) {
       const chargeId = String(mpResponse.id || `mp_${Date.now()}`);
+      const isMpLiveMode = mpResponse.live_mode !== false;
       const txData = mpResponse.point_of_interaction?.transaction_data || {};
       // Preservar qr_code verbatim sem truncamento (apenas removendo quebras de linha acidentais)
       const qrCodeText =
@@ -907,13 +1135,54 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       const cleanRawBase64 = normalizeCleanBase64(txData.qr_code_base64);
       const ticketUrl = typeof txData.ticket_url === 'string' ? txData.ticket_url : null;
 
+      if (!isMpLiveMode) {
+        console.error('[Mercado Pago Sandbox/Test Response Blocked]', {
+          timestamp: new Date().toISOString(),
+          endpoint: MERCADOPAGO_PAYMENTS_PRODUCTION_URL,
+          paymentId: chargeId,
+          live_mode: mpResponse.live_mode,
+          status: mpResponse.status,
+          status_detail: mpResponse.status_detail,
+          mpRequestId: mpResponseRequestId || undefined,
+          idempotencyKey,
+          tokenMode,
+          qrCodePreview: qrCodeText.slice(0, 60),
+          message:
+            'Mercado Pago retornou live_mode=false (homologação/teste), o que provoca erro [QR104DES] nos bancos.',
+        });
+        return res.status(422).json({
+          success: false,
+          provider: 'mercadopago',
+          id: chargeId,
+          liveMode: false,
+          error:
+            'O Mercado Pago gerou um Pix em modo de teste/homologação (live_mode=false), que causa o erro [QR104DES]. Verifique se MERCADOPAGO_ACCESS_TOKEN é de Produção (APP_USR-...) e se as credenciais de produção estão ativadas na conta.',
+          mpRequestId: mpResponseRequestId || undefined,
+          tokenMode,
+          idempotencyKey,
+          publicKeyConfigured: Boolean(publicKey),
+          accessTokenConfigured: true,
+        });
+      }
+
       if (!qrCodeText) {
+        console.error('[Mercado Pago Missing QR Code Payload]', {
+          timestamp: new Date().toISOString(),
+          endpoint: MERCADOPAGO_PAYMENTS_PRODUCTION_URL,
+          paymentId: chargeId,
+          status: mpResponse.status,
+          status_detail: mpResponse.status_detail,
+          point_of_interaction: mpResponse.point_of_interaction || null,
+          mpRequestId: mpResponseRequestId || undefined,
+          idempotencyKey,
+        });
         return res.status(502).json({
           success: false,
           provider: 'mercadopago',
           id: chargeId,
           error:
-            'Mercado Pago aprovou a requisição, mas point_of_interaction.transaction_data.qr_code veio vazio.',
+            'Mercado Pago respondeu sem point_of_interaction.transaction_data.qr_code válido.',
+          mpRequestId: mpResponseRequestId || undefined,
           idempotencyKey,
           publicKeyConfigured: Boolean(publicKey),
           accessTokenConfigured: true,
@@ -944,6 +1213,8 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       return res.status(200).json({
         success: true,
         provider: 'mercadopago',
+        liveMode: true,
+        tokenMode,
         id: chargeId,
         status: mpResponse.status || 'pending',
         amount: paymentAmount,
