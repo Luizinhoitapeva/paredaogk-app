@@ -397,10 +397,167 @@ interface PixChargeRecord {
   receiptCode?: string;
   matchId?: string;
   description?: string;
+  slotsCount?: number;
+  goalkeeperIds?: string[];
   supabaseCredited: boolean;
   createdAt: string;
   expiresAt: string;
   confirmedAt?: string;
+}
+
+const SERVER_ITAPEVA_BASE_COORDS = { lat: -23.9822, lng: -48.8756 };
+
+const SERVER_REGIONAL_COORDS: Record<string, { lat: number; lng: number }> = {
+  'itapeva': { lat: -23.9822, lng: -48.8756 },
+  'centro': { lat: -23.9822, lng: -48.8756 },
+  'araxa': { lat: -23.9781, lng: -48.8672 },
+  'jardim ferrari': { lat: -23.9894, lng: -48.8825 },
+  'vila aparecida': { lat: -23.9756, lng: -48.8834 },
+  'vila oPHIR': { lat: -23.9765, lng: -48.8615 },
+  'jardim maringa': { lat: -23.9912, lng: -48.8691 },
+  'parque sao jorge': { lat: -23.9958, lng: -48.8841 },
+  'vila mariana': { lat: -23.9685, lng: -48.8712 },
+  'taquarivai': { lat: -23.9244, lng: -48.6939 },
+  'nova campina': { lat: -24.1225, lng: -48.9022 },
+  'ribeirao branco': { lat: -24.2208, lng: -48.7656 },
+  'itabera': { lat: -23.8619, lng: -49.1372 },
+  'buri': { lat: -23.7975, lng: -48.5928 },
+  'capao bonito': { lat: -24.0056, lng: -48.3489 },
+  'itapetininga': { lat: -23.5917, lng: -48.0531 },
+};
+
+function normalizeGeoKey(val?: string | null): string {
+  return String(val || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+function haversineKmServer(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
+): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  return Number((R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(1));
+}
+
+function resolveCoordsServer(
+  city?: string | null,
+  neighborhood?: string | null,
+  lat?: number | null,
+  lng?: number | null
+): { lat: number; lng: number } {
+  if (
+    typeof lat === 'number' &&
+    typeof lng === 'number' &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat !== 0 &&
+    lng !== 0
+  ) {
+    return { lat, lng };
+  }
+  const combined = `${normalizeGeoKey(neighborhood)} ${normalizeGeoKey(city)}`;
+  for (const [key, coords] of Object.entries(SERVER_REGIONAL_COORDS)) {
+    if (combined.includes(normalizeGeoKey(key))) {
+      return coords;
+    }
+  }
+  return SERVER_ITAPEVA_BASE_COORDS;
+}
+
+function computeServerProfileDistanceKm(
+  profile: Record<string, any>,
+  originCity?: string | null,
+  originAddress?: string | null
+): number {
+  const storedDistance = Number(profile.distance_km);
+  const hasStored = Number.isFinite(storedDistance) && storedDistance > 0;
+  const originCoords = resolveCoordsServer(originCity, originAddress);
+  const targetCoords = resolveCoordsServer(
+    profile.city,
+    profile.neighborhood,
+    typeof profile.latitude === 'number' ? profile.latitude : Number(profile.lat),
+    typeof profile.longitude === 'number' ? profile.longitude : Number(profile.lng)
+  );
+  const geoDist = haversineKmServer(
+    originCoords.lat,
+    originCoords.lng,
+    targetCoords.lat,
+    targetCoords.lng
+  );
+  if (hasStored && geoDist <= 1) {
+    return Number(storedDistance.toFixed(1));
+  }
+  return geoDist > 0 ? geoDist : hasStored ? Number(storedDistance.toFixed(1)) : 2.5;
+}
+
+function getEvolutionApiConfig() {
+  const apiUrl = cleanEnvSecret(process.env.EVOLUTION_API_URL || '').replace(/\/+$/, '');
+  const apiKey = cleanEnvSecret(process.env.EVOLUTION_API_KEY || '');
+  const instanceName = cleanEnvSecret(process.env.EVOLUTION_INSTANCE_NAME || 'paredaogk');
+  const configured =
+    Boolean(apiUrl) &&
+    Boolean(apiKey) &&
+    !isPlaceholderSecret(apiUrl) &&
+    !isPlaceholderSecret(apiKey);
+  return { apiUrl, apiKey, instanceName, configured };
+}
+
+function normalizePhoneBrazilE164(rawPhone?: string | null): string {
+  const digits = String(rawPhone || '').replace(/\D/g, '');
+  if (!digits || digits.length < 10) return '';
+  return digits.startsWith('55') ? digits : `55${digits}`;
+}
+
+async function sendEvolutionWhatsappText(params: {
+  phone: string;
+  text: string;
+}): Promise<{ sent: boolean; reason?: string }> {
+  const cfg = getEvolutionApiConfig();
+  const normalizedPhone = normalizePhoneBrazilE164(params.phone);
+  if (!normalizedPhone) {
+    return { sent: false, reason: 'invalid_phone' };
+  }
+  if (!cfg.configured) {
+    return { sent: false, reason: 'evolution_api_not_configured' };
+  }
+
+  try {
+    const endpoint = `${cfg.apiUrl}/message/sendText/${encodeURIComponent(cfg.instanceName)}`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: cfg.apiKey,
+      },
+      body: JSON.stringify({
+        number: normalizedPhone,
+        text: params.text,
+        delay: 600,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      return { sent: false, reason: `http_${response.status}:${errText.slice(0, 120)}` };
+    }
+    return { sent: true };
+  } catch (err: any) {
+    return { sent: false, reason: err?.message || 'evolution_fetch_error' };
+  }
 }
 
 const pixChargesStore = new Map<string, PixChargeRecord>();
@@ -957,6 +1114,19 @@ async function processApprovedWebhookPayload(params: {
       ''
   ).trim();
 
+  const rawGoalkeeperIdsStr = String(
+    data?.metadata?.goalkeeper_ids || parsedPayload?.metadata?.goalkeeper_ids || ''
+  ).trim();
+  const parsedGoalkeeperIds = Array.from(
+    new Set([
+      ...(rawGoalkeeperIdsStr
+        ? rawGoalkeeperIdsStr.split(',').map((s) => s.trim()).filter(Boolean)
+        : []),
+      ...(Array.isArray(existingCharge?.goalkeeperIds) ? existingCharge.goalkeeperIds : []),
+      ...(goalkeeperId ? [goalkeeperId] : []),
+    ])
+  );
+
   const goalkeeperName = String(
     data?.metadata?.goalkeeper_name ||
       parsedPayload?.metadata?.goalkeeper_name ||
@@ -977,17 +1147,31 @@ async function processApprovedWebhookPayload(params: {
     data?.metadata?.type ||
       parsedPayload?.metadata?.type ||
       existingCharge?.type ||
-      (externalRef.startsWith('mtch') || Boolean(goalkeeperId) ? 'match_booking' : 'wallet_deposit')
+      (externalRef.startsWith('mtch') || Boolean(goalkeeperId) || parsedGoalkeeperIds.length > 0
+        ? 'match_booking'
+        : 'wallet_deposit')
   ).toLowerCase();
   const paymentType: 'wallet_deposit' | 'match_booking' =
     rawPaymentType === 'match_booking' ? 'match_booking' : 'wallet_deposit';
+
+  const slotsCount = Math.min(
+    2,
+    Math.max(
+      1,
+      Number(
+        data?.metadata?.slots_count ||
+          existingCharge?.slotsCount ||
+          (parsedGoalkeeperIds.length > 1 ? parsedGoalkeeperIds.length : 1)
+      )
+    )
+  );
 
   const explicitHouseFee = data?.house_fee_brl ?? data?.metadata?.house_fee_brl;
   const houseFeeBrl =
     explicitHouseFee !== undefined && explicitHouseFee !== null && explicitHouseFee !== ''
       ? Math.min(grossAmountBrl, Math.max(0, Number(explicitHouseFee)))
       : paymentType === 'match_booking' && grossAmountBrl > 0
-      ? Math.min(grossAmountBrl, HOUSE_FEE_BRL)
+      ? Math.min(grossAmountBrl, HOUSE_FEE_BRL * slotsCount)
       : 0;
 
   const netAmountBrl = Number(Math.max(0, grossAmountBrl - houseFeeBrl).toFixed(2));
@@ -1005,40 +1189,80 @@ async function processApprovedWebhookPayload(params: {
   let newWalletBalance: number | undefined;
   let newCustodyBalance: number | undefined;
   let creditedColumn: string | undefined;
-  let resolvedTargetUserId: string | undefined = goalkeeperId || userId || undefined;
+  let resolvedTargetUserId: string | undefined = parsedGoalkeeperIds[0] || goalkeeperId || userId || undefined;
   let creditReason: string | undefined;
   let alreadyProcessed = existingCharge?.status === 'completed';
 
   if (isPaymentApprovedEvent && !alreadyProcessed) {
-    if (grossAmountBrl > 0 && (userId || goalkeeperId || goalkeeperName || payerEmail)) {
-      const creditResult = await creditSupabaseWalletFromWebhook({
-        paymentId,
-        userId,
-        goalkeeperId: goalkeeperId || undefined,
-        goalkeeperName: goalkeeperName || undefined,
-        payerEmail: payerEmail || undefined,
-        paymentType,
-        event,
-        grossAmountBrl,
-        houseFeeBrl,
-        netAmountBrl,
-        receiptCode,
-        matchId,
-        arenaName,
-        description:
-          existingCharge?.description ||
-          data?.description ||
-          (paymentType === 'match_booking'
-            ? 'Contratação de Goleiro via Pix Mercado Pago'
-            : 'Recarga Carteira Digital ParedãoGK'),
-      });
-      supabaseCredited = creditResult.credited;
-      newWalletBalance = creditResult.newBalance;
-      newCustodyBalance = creditResult.newCustodyBalance;
-      creditedColumn = creditResult.creditedColumn;
-      resolvedTargetUserId = creditResult.resolvedTargetUserId || resolvedTargetUserId;
-      creditReason = creditResult.reason;
-      alreadyProcessed = Boolean(creditResult.alreadyProcessed);
+    if (grossAmountBrl > 0 && (userId || goalkeeperId || parsedGoalkeeperIds.length > 0 || goalkeeperName || payerEmail)) {
+      if (paymentType === 'match_booking' && parsedGoalkeeperIds.length > 1) {
+        const slotTargets = parsedGoalkeeperIds.slice(0, slotsCount);
+        const perSlotGross = Number((grossAmountBrl / slotTargets.length).toFixed(2));
+        const perSlotFee = Number((houseFeeBrl / slotTargets.length).toFixed(2));
+        const perSlotNet = Number((netAmountBrl / slotTargets.length).toFixed(2));
+
+        let anyCredited = false;
+        for (let idx = 0; idx < slotTargets.length; idx++) {
+          const gkTargetId = slotTargets[idx];
+          const slotRes = await creditSupabaseWalletFromWebhook({
+            paymentId: `${paymentId}_slot${idx + 1}`,
+            userId,
+            goalkeeperId: gkTargetId,
+            goalkeeperName: idx === 0 ? goalkeeperName || undefined : undefined,
+            payerEmail: payerEmail || undefined,
+            paymentType,
+            event,
+            grossAmountBrl: perSlotGross,
+            houseFeeBrl: perSlotFee,
+            netAmountBrl: perSlotNet,
+            receiptCode: `${receiptCode}-V${idx + 1}`,
+            matchId,
+            arenaName,
+            description:
+              existingCharge?.description ||
+              `Convocação Vaga ${idx + 1}/${slotTargets.length} ParedãoGK`,
+          });
+          if (slotRes.credited) {
+            anyCredited = true;
+            newWalletBalance = slotRes.newBalance;
+            newCustodyBalance = slotRes.newCustodyBalance;
+            creditedColumn = slotRes.creditedColumn;
+            resolvedTargetUserId = slotRes.resolvedTargetUserId || resolvedTargetUserId;
+          } else if (slotRes.reason) {
+            creditReason = slotRes.reason;
+          }
+        }
+        supabaseCredited = anyCredited;
+      } else {
+        const creditResult = await creditSupabaseWalletFromWebhook({
+          paymentId,
+          userId,
+          goalkeeperId: parsedGoalkeeperIds[0] || goalkeeperId || undefined,
+          goalkeeperName: goalkeeperName || undefined,
+          payerEmail: payerEmail || undefined,
+          paymentType,
+          event,
+          grossAmountBrl,
+          houseFeeBrl,
+          netAmountBrl,
+          receiptCode,
+          matchId,
+          arenaName,
+          description:
+            existingCharge?.description ||
+            data?.description ||
+            (paymentType === 'match_booking'
+              ? 'Contratação de Goleiro via Pix Mercado Pago'
+              : 'Recarga Carteira Digital ParedãoGK'),
+        });
+        supabaseCredited = creditResult.credited;
+        newWalletBalance = creditResult.newBalance;
+        newCustodyBalance = creditResult.newCustodyBalance;
+        creditedColumn = creditResult.creditedColumn;
+        resolvedTargetUserId = creditResult.resolvedTargetUserId || resolvedTargetUserId;
+        creditReason = creditResult.reason;
+        alreadyProcessed = Boolean(creditResult.alreadyProcessed);
+      }
     } else {
       creditReason = 'missing_payer_identifier_or_amount';
     }
@@ -1238,8 +1462,10 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       matchId,
       userId,
       goalkeeperId,
+      goalkeeperIds,
       goalkeeperName,
       arenaName,
+      slotsCount,
       publicKey: bodyPublicKey,
       mercadoPagoPublicKey,
       idempotencyKey: bodyIdempotencyKey,
@@ -1256,7 +1482,20 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       });
     }
 
-    const houseFee = 5;
+    const normalizedGoalkeeperIds = Array.from(
+      new Set([
+        ...(Array.isArray(goalkeeperIds) ? goalkeeperIds.map((g: any) => String(g || '').trim()).filter(Boolean) : []),
+        ...(goalkeeperId ? [String(goalkeeperId).trim()] : []),
+      ])
+    );
+    const resolvedSlotsCount = Math.min(
+      2,
+      Math.max(1, Number(slotsCount || (normalizedGoalkeeperIds.length > 1 ? normalizedGoalkeeperIds.length : 1)))
+    );
+    const houseFee =
+      type === 'match_booking'
+        ? Math.min(paymentAmount, HOUSE_FEE_BRL * resolvedSlotsCount)
+        : 0;
     const goalkeeperNet = Math.max(0, Number((paymentAmount - houseFee).toFixed(2)));
 
     // Header de Idempotência: preservar chave válida recebida ou gerar UUID v4 único por requisição
@@ -1454,8 +1693,8 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       .replace(/[^a-zA-Z0-9_-]/g, '')
       .slice(0, 64);
 
-    const resolvedHouseFee = type === 'match_booking' ? Math.min(paymentAmount, HOUSE_FEE_BRL) : 0;
-    const resolvedNetAmount = Number(Math.max(0, paymentAmount - resolvedHouseFee).toFixed(2));
+    const resolvedHouseFee = houseFee;
+    const resolvedNetAmount = goalkeeperNet;
 
     const metadataPayload: Record<string, string> = {
       platform: 'ParedaoGK',
@@ -1464,12 +1703,16 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       gross_amount_brl: paymentAmount.toFixed(2),
       house_fee_brl: resolvedHouseFee.toFixed(2),
       net_amount_brl: resolvedNetAmount.toFixed(2),
+      slots_count: String(resolvedSlotsCount),
     };
     if (resolvedUserId) {
       metadataPayload.user_id = String(resolvedUserId);
     }
     if (goalkeeperId) {
       metadataPayload.goalkeeper_id = String(goalkeeperId);
+    }
+    if (normalizedGoalkeeperIds.length > 0) {
+      metadataPayload.goalkeeper_ids = normalizedGoalkeeperIds.join(',').slice(0, 180);
     }
     if (goalkeeperName) {
       metadataPayload.goalkeeper_name = String(goalkeeperName).slice(0, 80);
@@ -1727,6 +1970,8 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
         ticketUrl,
         matchId,
         description: resolvedDescription,
+        slotsCount: resolvedSlotsCount,
+        goalkeeperIds: normalizedGoalkeeperIds,
         supabaseCredited: false,
         createdAt: nowIso,
         expiresAt,
@@ -1741,6 +1986,7 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
         id: chargeId,
         status: mpResponse.status || 'pending',
         amount: paymentAmount,
+        slotsCount: resolvedSlotsCount,
         houseFee,
         goalkeeperNet,
         qrCodeText,
@@ -1794,6 +2040,8 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       ticketUrl: null,
       matchId,
       description: resolvedDescription,
+      slotsCount: resolvedSlotsCount,
+      goalkeeperIds: normalizedGoalkeeperIds,
       supabaseCredited: false,
       createdAt: nowIso,
       expiresAt: expirationDateIso,
@@ -1806,6 +2054,7 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       id: chargeId,
       status: 'pending',
       amount: paymentAmount,
+      slotsCount: resolvedSlotsCount,
       houseFee,
       goalkeeperNet,
       qrCodeText: pixCode,
@@ -2715,6 +2964,351 @@ Regras do JSON:
     return res.status(500).json({
       success: false,
       error: error?.message || 'Erro ao gerar feedback pós-partida.',
+    });
+  }
+});
+
+/**
+ * 4. Rota de API: POST /api/convocacao/notificar-goleiros
+ * Filtra atletas cadastrados como goleiros (role = 'goalkeeper' ou 'goleiro') num raio de até 30 km,
+ * registra alertas na tabela 'notifications' do Supabase e dispara mensagens WhatsApp via Evolution API.
+ */
+app.post('/api/convocacao/notificar-goleiros', async (req: Request, res: Response) => {
+  try {
+    const {
+      matchId,
+      arenaName = 'Araxá Futebol Society',
+      address = 'Itapeva - SP',
+      city = 'Itapeva - SP',
+      date = 'Hoje',
+      time = '20:00 - 21:00',
+      durationMinutes = 60,
+      modality = 'Society',
+      gameLevel = 'Médio',
+      price = 25,
+      slotsCount = 1,
+      radiusKm = 30,
+      organizerName = 'Contratante ParedãoGK',
+      selectionMode = 'random',
+      selectedGoalkeeperIds = [],
+      eligibleGoalkeepers = [],
+    } = req.body || {};
+
+    const maxRadiusKm = Math.min(50, Math.max(1, Number(radiusKm || 30)));
+    const resolvedSlotsCount = Math.min(2, Math.max(1, Number(slotsCount || 1)));
+    const totalPrice = Number(price || 25);
+    const feeTotal = Math.min(totalPrice, HOUSE_FEE_BRL * resolvedSlotsCount);
+    const netPerSlot = Number(Math.max(0, (totalPrice - feeTotal) / resolvedSlotsCount).toFixed(2));
+    const evolutionConfig = getEvolutionApiConfig();
+
+    const supabaseClient = getServerSupabaseAdminClient(false);
+    let eligibleTargets: Array<{
+      id: string;
+      name: string;
+      phone?: string;
+      city?: string;
+      neighborhood?: string;
+      distanceKm: number;
+    }> = [];
+
+    if (supabaseClient) {
+      const { data: profilesData, error: profilesErr } = await supabaseClient
+        .from('profiles')
+        .select('*')
+        .in('role', ['goleiro', 'goalkeeper'])
+        .limit(60);
+
+      if (!profilesErr && Array.isArray(profilesData) && profilesData.length > 0) {
+        eligibleTargets = profilesData
+          .map((p: any) => ({
+            id: String(p.id),
+            name: String(p.name || p.nickname || 'Goleiro GK'),
+            phone: p.phone ? String(p.phone) : undefined,
+            city: p.city ? String(p.city) : 'Itapeva - SP',
+            neighborhood: p.neighborhood ? String(p.neighborhood) : 'Centro',
+            distanceKm: computeServerProfileDistanceKm(p, city, address),
+          }))
+          .filter((gk) => gk.distanceKm <= maxRadiusKm)
+          .sort((a, b) => a.distanceKm - b.distanceKm);
+      }
+    }
+
+    if (eligibleTargets.length === 0 && Array.isArray(eligibleGoalkeepers) && eligibleGoalkeepers.length > 0) {
+      eligibleTargets = eligibleGoalkeepers
+        .map((gk: any) => ({
+          id: String(gk.id),
+          name: String(gk.name || 'Goleiro GK'),
+          phone: gk.phone ? String(gk.phone) : undefined,
+          city: gk.city || 'Itapeva - SP',
+          neighborhood: gk.neighborhood || 'Centro',
+          distanceKm: Number(gk.distanceKm ?? 2.5),
+        }))
+        .filter((gk) => gk.distanceKm <= maxRadiusKm)
+        .sort((a, b) => a.distanceKm - b.distanceKm);
+    }
+
+    const explicitTargetIds = Array.isArray(selectedGoalkeeperIds)
+      ? selectedGoalkeeperIds.map((id: any) => String(id || '').trim()).filter(Boolean)
+      : [];
+
+    const finalTargets =
+      selectionMode === 'specific' && explicitTargetIds.length > 0
+        ? eligibleTargets.filter((gk) => explicitTargetIds.includes(gk.id))
+        : eligibleTargets;
+
+    const effectiveTargets = finalTargets.length > 0 ? finalTargets : eligibleTargets;
+    const nowIso = new Date().toISOString();
+
+    let panelNotifiedCount = 0;
+    let whatsappSentCount = 0;
+    const dispatchDetails: Array<{
+      id: string;
+      name: string;
+      distanceKm: number;
+      panelNotified: boolean;
+      whatsappSent: boolean;
+      whatsappReason?: string;
+    }> = [];
+
+    for (let idx = 0; idx < effectiveTargets.length; idx++) {
+      const target = effectiveTargets[idx];
+      let panelNotified = false;
+
+      if (supabaseClient && isValidUuid(target.id)) {
+        const notifRes = await resilientSupabaseUpsert(
+          supabaseClient,
+          'notifications',
+          {
+            id: `notif-conv-${Date.now()}-${idx}`,
+            user_id: target.id,
+            category: 'radar',
+            title:
+              selectionMode === 'specific'
+                ? `🧤 Convocação Direta: ${arenaName}`
+                : `⚽ Bora Jogar! Vaga a ${target.distanceKm} km`,
+            description: `${organizerName} abriu ${resolvedSlotsCount} vaga(s) de ${modality} (${durationMinutes} min · Nível ${gameLevel}) em ${arenaName} (${date} · ${time}). Líquido GK: R$ ${netPerSlot.toFixed(2)} (Taxa Casa R$ ${HOUSE_FEE_BRL.toFixed(2)}).`,
+            read: false,
+            created_at: nowIso,
+          },
+          'id'
+        );
+        panelNotified = !notifRes.error;
+        if (panelNotified) panelNotifiedCount += 1;
+      }
+
+      const whatsappText = [
+        `🧤 *ParedãoGK · Nova Convocação (${target.distanceKm} km de distância)*`,
+        `📍 Local: *${arenaName}* (${address})`,
+        `🗓 Data/Horário: *${date}* · *${time}* (${durationMinutes} min)`,
+        `⚽ Modalidade: *${modality}* | Nível: *${gameLevel}*`,
+        `💰 Cachê Líquido GK: *R$ ${netPerSlot.toFixed(2)}* (Taxa Casa R$ 5,00 separada)`,
+        `👉 Abra o app ParedãoGK para aceitar agora!`,
+      ].join('\n');
+
+      const waRes = target.phone
+        ? await sendEvolutionWhatsappText({ phone: target.phone, text: whatsappText })
+        : { sent: false, reason: 'missing_phone' };
+
+      if (waRes.sent) whatsappSentCount += 1;
+
+      dispatchDetails.push({
+        id: target.id,
+        name: target.name,
+        distanceKm: target.distanceKm,
+        panelNotified,
+        whatsappSent: waRes.sent,
+        whatsappReason: waRes.reason,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      matchId: matchId || `mtch-${Date.now()}`,
+      radiusKm: maxRadiusKm,
+      eligibleCount: effectiveTargets.length,
+      panelNotifiedCount,
+      whatsappSentCount,
+      evolutionConfigured: evolutionConfig.configured,
+      evolutionInstance: evolutionConfig.configured ? evolutionConfig.instanceName : null,
+      dispatches: dispatchDetails,
+    });
+  } catch (err: any) {
+    console.error('[Convocacao Notificar Goleiros Error]', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao notificar goleiros no raio de 30 km.',
+    });
+  }
+});
+
+/**
+ * 5. Rota de API: POST /api/convocacao/confirmar-custodia
+ * Persiste a partida no Supabase, aplica a retenção fixa da Taxa da Casa (R$ 5,00 por vaga)
+ * e credita o líquido correspondente em custódia (pending_balance) + wallet_transactions.
+ */
+app.post('/api/convocacao/confirmar-custodia', async (req: Request, res: Response) => {
+  try {
+    const {
+      match,
+      payerUserId,
+      payerEmail,
+      paymentMethod = 'pix',
+      paymentId,
+    } = req.body || {};
+
+    if (!match || !match.arenaName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Dados da partida obrigatórios para registrar custódia.',
+      });
+    }
+
+    const slotsCount = Math.min(2, Math.max(1, Number(match.goalkeeperSlotsCount || match.slots?.length || 1)));
+    const totalAmount = Number(match.price || 25);
+    const totalHouseFee = Math.min(totalAmount, HOUSE_FEE_BRL * slotsCount);
+    const totalNetCustody = Number(Math.max(0, totalAmount - totalHouseFee).toFixed(2));
+    const netPerSlot = Number((totalNetCustody / slotsCount).toFixed(2));
+    const nowIso = new Date().toISOString();
+    const cleanMatchKey = String(match.id || `mtch-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
+
+    const supabaseClient = getServerSupabaseAdminClient(false);
+    let matchPersisted = false;
+    let supabaseCredited = false;
+    let slotsCredited = 0;
+
+    if (supabaseClient) {
+      const slotList: Array<{ goalkeeperId?: string; goalkeeperName?: string }> =
+        Array.isArray(match.slots) && match.slots.length > 0
+          ? match.slots.slice(0, slotsCount)
+          : [
+              {
+                goalkeeperId: match.goalkeeperId,
+                goalkeeperName: match.goalkeeperName,
+              },
+            ];
+
+      const matchRow: Record<string, any> = {
+        id: cleanMatchKey,
+        organizer_id: isValidUuid(match.organizerId) ? match.organizerId : payerUserId || null,
+        organizer_name: match.organizerName || 'Contratante',
+        goalkeeper_id: isValidUuid(slotList[0]?.goalkeeperId) ? slotList[0]?.goalkeeperId : null,
+        goalkeeper_name:
+          slotList
+            .map((s) => s.goalkeeperName)
+            .filter(Boolean)
+            .join(' & ') ||
+          match.goalkeeperName ||
+          'Aguardando Goleiro (Radar 30km)',
+        arena_name: match.arenaName,
+        address: match.address || 'Itapeva - SP',
+        city: match.city || 'Itapeva - SP',
+        date: match.date || 'Hoje',
+        time: match.time || '20:00 - 21:00',
+        modality: match.modality || 'Society',
+        competitive_level: match.gameLevel || match.competitiveLevel || 'Médio',
+        price: totalAmount,
+        house_fee: totalHouseFee,
+        goalkeeper_payout: totalNetCustody,
+        cashback_earned: Number((totalAmount * 0.1).toFixed(2)),
+        status: match.status || 'confirmed',
+        payment_provider: paymentMethod === 'wallet' ? 'wallet' : 'mercadopago',
+        payment_status: 'paid',
+        notes: match.notes || '',
+        created_at: match.createdAt || nowIso,
+      };
+
+      const matchRes = await resilientSupabaseUpsert(supabaseClient, 'matches', matchRow, 'id');
+      matchPersisted = !matchRes.error;
+
+      // Deduzir saldo da carteira do contratante caso tenha escolhido pagamento por saldo
+      if (paymentMethod === 'wallet' && (payerUserId || payerEmail)) {
+        const payerLookup = await resolveSupabaseProfileForCredit({
+          supabaseClient,
+          userId: payerUserId,
+          payerEmail,
+        });
+        if (payerLookup.profile && payerLookup.resolvedUserId) {
+          const { availableCol } = detectProfileBalanceColumns(payerLookup.profile);
+          const currBal = Number(payerLookup.profile[availableCol] ?? 0);
+          const nextBal = Number(Math.max(0, currBal - totalAmount).toFixed(2));
+          await resilientSupabaseUpdate(
+            supabaseClient,
+            'profiles',
+            { [availableCol]: nextBal },
+            'id',
+            payerLookup.resolvedUserId
+          );
+
+          await resilientSupabaseUpsert(
+            supabaseClient,
+            'wallet_transactions',
+            {
+              id: `tx-wpay-${cleanMatchKey}`,
+              user_id: payerLookup.resolvedUserId,
+              type: 'match_payment',
+              amount: -totalAmount,
+              gross_amount: totalAmount,
+              house_fee: totalHouseFee,
+              net_amount: totalNetCustody,
+              description: `Pagamento Convocação ${slotsCount} vaga(s) · ${match.arenaName} (Taxa Casa R$ ${totalHouseFee.toFixed(2)})`,
+              status: 'completed',
+              provider: 'wallet',
+              match_id: cleanMatchKey,
+              arena_name: match.arenaName,
+              created_at: nowIso,
+            },
+            'id'
+          );
+        }
+      }
+
+      // Creditar custódia líquida para cada vaga de goleiro e registrar Taxa da Casa (R$ 5,00/vaga)
+      const perSlotGross = Number((totalAmount / slotList.length).toFixed(2));
+      const perSlotFee = Number((totalHouseFee / slotList.length).toFixed(2));
+      const basePaymentKey = String(paymentId || `cust_${cleanMatchKey}`).replace(/[^a-zA-Z0-9_-]/g, '');
+
+      for (let idx = 0; idx < slotList.length; idx++) {
+        const slot = slotList[idx];
+        const creditRes = await creditSupabaseWalletFromWebhook({
+          paymentId: `${basePaymentKey}_v${idx + 1}`,
+          userId: payerUserId,
+          goalkeeperId: slot.goalkeeperId,
+          goalkeeperName: slot.goalkeeperName,
+          payerEmail,
+          paymentType: 'match_booking',
+          event: 'payment.confirmed',
+          grossAmountBrl: perSlotGross,
+          houseFeeBrl: perSlotFee,
+          netAmountBrl: netPerSlot,
+          receiptCode: `CUST-${cleanMatchKey.slice(-4).toUpperCase()}-V${idx + 1}`,
+          matchId: cleanMatchKey,
+          arenaName: match.arenaName,
+          description: `Custódia Vaga ${idx + 1}/${slotList.length} · ${match.arenaName}`,
+        });
+        if (creditRes.credited) {
+          supabaseCredited = true;
+          slotsCredited += 1;
+        }
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      matchId: cleanMatchKey,
+      slotsCount,
+      totalAmount,
+      totalHouseFee,
+      totalNetCustody,
+      netPerSlot,
+      slotsCredited,
+      matchPersisted,
+      supabaseCredited,
+    });
+  } catch (err: any) {
+    console.error('[Confirmar Custodia Error]', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao processar separação financeira de custódia e taxa da casa.',
     });
   }
 });

@@ -15,9 +15,14 @@ import { fetchNotificationsFromSupabase, isSupabaseConfigured, supabase } from '
 interface NotificationsTabProps {
   userId?: string;
   onNavigateTab: (tab: TabType) => void;
+  onConfirmEnRouteFromNotification?: () => void;
 }
 
-export const NotificationsTab: React.FC<NotificationsTabProps> = ({ userId, onNavigateTab }) => {
+export const NotificationsTab: React.FC<NotificationsTabProps> = ({
+  userId,
+  onNavigateTab,
+  onConfirmEnRouteFromNotification,
+}) => {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [filterCategory, setFilterCategory] = useState<string>('todas');
   const [isLoading, setIsLoading] = useState(false);
@@ -167,23 +172,40 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({ userId, onNa
                 {getIcon(item.category)}
               </div>
 
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between mb-1">
-                  <h4
-                    className={`font-bold text-xs truncate ${
-                      item.read ? 'text-slate-700 dark:text-slate-300' : 'text-slate-900 dark:text-white'
-                    }`}
-                  >
-                    {item.title}
-                  </h4>
-                  <span className="text-[10px] text-slate-500 font-mono">
-                    {item.timestamp}
-                  </span>
+              <div className="flex-1 min-w-0 space-y-2">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <h4
+                      className={`font-bold text-xs truncate ${
+                        item.read ? 'text-slate-700 dark:text-slate-300' : 'text-slate-900 dark:text-white'
+                      }`}
+                    >
+                      {item.title}
+                    </h4>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      {item.timestamp}
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                    {item.description}
+                  </p>
                 </div>
 
-                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                  {item.description}
-                </p>
+                {item.actionType === 'confirm_en_route' && onConfirmEnRouteFromNotification && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleToggleRead(item.id);
+                      onConfirmEnRouteFromNotification();
+                      onNavigateTab('home');
+                    }}
+                    className="px-3.5 py-1.5 rounded-lg bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-[11px] cursor-pointer transition-all"
+                  >
+                    Sim, estou a caminho
+                  </button>
+                )}
               </div>
 
               {!item.read && (

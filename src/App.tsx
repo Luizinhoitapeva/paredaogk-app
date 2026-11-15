@@ -19,7 +19,11 @@ import {
   fetchAdminPixWithdrawalsFromSupabase,
   fetchOrCreateSupabaseProfile,
   isAuthorizedAdmin,
+  acceptMatchVacancyInSupabase,
+  trigger20MinEnRouteNotificationInSupabase,
+  confirmGoalkeeperEnRoute20mInSupabase,
 } from './lib/supabaseClient';
+import { shouldTrigger20MinEnRouteAlert } from './utils/geoMatchmaking';
 import { OnboardingCarousel } from './components/OnboardingCarousel';
 import { AuthModal } from './components/AuthModal';
 import { TopHeader } from './components/TopHeader';
@@ -428,6 +432,15 @@ export default function App() {
           return [formattedBooking, ...prev];
         });
       },
+      onOperationalStatusChange: (matchUpdate) => {
+        if (!matchUpdate?.id) return;
+        setMatches((prev) =>
+          prev.map((m) => (m.id === matchUpdate.id ? { ...m, ...matchUpdate } : m))
+        );
+        setRecentBooking((prev) =>
+          prev && prev.id === matchUpdate.id ? { ...prev, ...matchUpdate } : prev
+        );
+      },
     });
 
     return () => {
@@ -467,8 +480,21 @@ export default function App() {
   };
 
   // Aceitar convocação e navegar para a aba de chat
-  const handleAcceptRealtimeCall = (booking: MatchBooking) => {
+  const handleAcceptRealtimeCall = async (booking: MatchBooking) => {
     setIsCallAlertOpen(false);
+    const { updatedMatch } = await acceptMatchVacancyInSupabase({
+      match: booking,
+      goalkeeper: currentUser,
+    });
+
+    setMatches((prev) => {
+      const exists = prev.some((m) => m.id === updatedMatch.id);
+      return exists
+        ? prev.map((m) => (m.id === updatedMatch.id ? updatedMatch : m))
+        : [updatedMatch, ...prev];
+    });
+    setRecentBooking(updatedMatch);
+
     // Adicionar à conversa
     const newConv: Conversation = {
       id: `conv-${booking.id}`,
@@ -480,7 +506,7 @@ export default function App() {
       participantRating: 5.0,
       arenaName: booking.arenaName,
       matchDate: booking.date,
-      lastMessage: 'Convocação aceita! Goleiro a caminho.',
+      lastMessage: 'Convocação aceita! Goleiro confirmado.',
       lastMessageTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
       unreadCount: 0,
       messages: [
@@ -619,6 +645,59 @@ export default function App() {
       console.warn('[Safety Timeline Sync]', err)
     );
   };
+
+  // Aceite direto de vaga pelo painel da partida
+  const handleAcceptMatchVacancy = async (match: MatchBooking) => {
+    const { updatedMatch } = await acceptMatchVacancyInSupabase({
+      match,
+      goalkeeper: currentUser,
+    });
+    setMatches((prev) => prev.map((m) => (m.id === match.id ? updatedMatch : m)));
+    if (recentBooking?.id === match.id) {
+      setRecentBooking(updatedMatch);
+    }
+    setUnreadNotifications((prev) => prev + 1);
+  };
+
+  // Disparo da pergunta ativa 20 minutos antes: "Você está a caminho do jogo em [Local]?"
+  const handleTrigger20MinEnRouteAlert = async (match: MatchBooking) => {
+    const { updatedMatch } = await trigger20MinEnRouteNotificationInSupabase({
+      match,
+      goalkeeperUserId: currentUser.id,
+    });
+    setMatches((prev) => prev.map((m) => (m.id === match.id ? updatedMatch : m)));
+    if (recentBooking?.id === match.id) {
+      setRecentBooking(updatedMatch);
+    }
+    setUnreadNotifications((prev) => prev + 1);
+  };
+
+  // Confirmação "Sim" -> atualiza status operacional para "A Caminho" em tempo real
+  const handleConfirmEnRoute20m = async (match: MatchBooking) => {
+    const { updatedMatch } = await confirmGoalkeeperEnRoute20mInSupabase({
+      match,
+      goalkeeperName: currentUser.name,
+    });
+    setMatches((prev) => prev.map((m) => (m.id === match.id ? updatedMatch : m)));
+    if (recentBooking?.id === match.id) {
+      setRecentBooking(updatedMatch);
+    }
+    setUnreadNotifications((prev) => prev + 1);
+  };
+
+  // Verificação automática periódica (a cada 30s) para jogos dentro da janela de 20 minutos
+  useEffect(() => {
+    const checkWindow = () => {
+      matches.forEach((m) => {
+        if (shouldTrigger20MinEnRouteAlert(m)) {
+          handleTrigger20MinEnRouteAlert(m);
+        }
+      });
+    };
+    checkWindow();
+    const interval = setInterval(checkWindow, 30000);
+    return () => clearInterval(interval);
+  }, [matches]);
 
   // Sistema de Alerta SOS (Substituição Relâmpago)
   const handleTriggerSos = async (
@@ -952,6 +1031,38 @@ export default function App() {
 
       {/* Main Content Viewport */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 pt-5">
+        {/* Prompt Operacional Flutuante: 20 minutos antes ("Você está a caminho do jogo em [Local]?") */}
+        {(() => {
+          const pendingEnRouteMatch = matches.find(
+            (m) =>
+              m.enRoute20mNotified &&
+              !m.enRoute20mConfirmed &&
+              !m.enRoute45mConfirmed &&
+              !m.goalkeeperCancelled &&
+              m.status !== 'completed'
+          );
+          if (!pendingEnRouteMatch) return null;
+          return (
+            <div className="mb-4 p-4 rounded-2xl bg-[#22c55e]/15 border-2 border-[#22c55e] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg shadow-emerald-500/15">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider font-extrabold text-emerald-700 dark:text-[#22c55e] block">
+                  Notificação Operacional · 20 min antes do início
+                </span>
+                <p className="text-sm font-extrabold text-slate-900 dark:text-white">
+                  Você está a caminho do jogo em {pendingEnRouteMatch.arenaName}?
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleConfirmEnRoute20m(pendingEnRouteMatch)}
+                className="min-h-[42px] px-5 rounded-xl bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-xs shrink-0 cursor-pointer transition-all active:scale-95"
+              >
+                Sim, estou a caminho
+              </button>
+            </div>
+          );
+        })()}
+
         {currentTab === 'home' && (
           <HomeTab
             user={currentUser}
@@ -974,6 +1085,9 @@ export default function App() {
             onOpenFutshop={() => setIsFutshopModalOpen(true)}
             recentBooking={recentBooking}
             onOpenReviewModal={handleOpenReviewModal}
+            onAcceptMatchVacancy={handleAcceptMatchVacancy}
+            onTrigger20MinEnRouteAlert={handleTrigger20MinEnRouteAlert}
+            onConfirmEnRoute20m={handleConfirmEnRoute20m}
             onOpenHistory={() => setIsHistoryModalOpen(true)}
             onOpenPerformance={() => setCurrentTab('performance')}
             onOpenAuth={() => setIsAuthModalOpen(true)}
@@ -1021,6 +1135,20 @@ export default function App() {
           <NotificationsTab
             userId={currentUser.id}
             onNavigateTab={(tab) => setCurrentTab(tab)}
+            onConfirmEnRouteFromNotification={() => {
+              const target =
+                matches.find(
+                  (m) =>
+                    m.enRoute20mNotified &&
+                    !m.enRoute20mConfirmed &&
+                    m.status !== 'completed'
+                ) ||
+                recentBooking ||
+                matches.find((m) => m.status === 'confirmed');
+              if (target) {
+                handleConfirmEnRoute20m(target);
+              }
+            }}
           />
         )}
 
@@ -1151,6 +1279,7 @@ export default function App() {
         prefillTemplate={prefillTemplate}
         prefillGoalkeeper={prefillGoalkeeper}
         approvedArenas={arenas.filter((a) => a.status === 'approved')}
+        recentMatches={matches}
         onOpenAuth={() => setIsAuthModalOpen(true)}
       />
 

@@ -61,9 +61,37 @@ export interface Goalkeeper {
   bio: string;
   favoriteBrand: string;
   level: 'Iniciante' | 'Intermediário' | 'Avançado' | 'Profissional / Base';
+  phone?: string;
+  latitude?: number;
+  longitude?: number;
 }
 
-export type ModalityType = 'Society' | 'Campo 11' | 'Futsal' | 'Fut7';
+export type ModalityType = 'Society' | 'Fut7' | 'Campo 11' | 'Futsal' | 'Areia';
+
+export type GameDifficultyLevel = 'Não quero informar' | 'Fácil' | 'Médio' | 'Difícil';
+
+export type MatchSlotMode = 'random' | 'specific' | 'mixed';
+
+export type MatchOperationalStatus =
+  | 'awaiting_acceptance'
+  | 'accepted'
+  | 'en_route'
+  | 'arrived'
+  | 'completed'
+  | 'cancelled';
+
+export interface MatchGoalkeeperSlot {
+  slotIndex: number;
+  mode: MatchSlotMode;
+  goalkeeperId?: string;
+  goalkeeperName?: string;
+  goalkeeperPhoto?: string;
+  goalkeeperPhone?: string;
+  distanceKm?: number;
+  status: 'open' | 'accepted' | 'en_route' | 'completed' | 'cancelled';
+  acceptedAt?: string;
+  enRouteAt?: string;
+}
 
 export interface MatchReview {
   id: string;
@@ -110,7 +138,9 @@ export interface MatchBooking {
   address: string;
   city: string;
   date: string;
+  dateIso?: string;
   time: string;
+  durationMinutes?: number;
   modality: ModalityType;
   price: number;
   houseFee?: number;
@@ -118,7 +148,15 @@ export interface MatchBooking {
   pricingTier?: PricingTierCode;
   cashbackEarned: number;
   status: 'searching' | 'confirmed' | 'in_progress' | 'completed' | 'cancelled';
-  competitiveLevel: 'Resenha / Amigável' | 'Competitivo' | 'Varzea / Torneio';
+  competitiveLevel: 'Resenha / Amigável' | 'Competitivo' | 'Varzea / Torneio' | GameDifficultyLevel;
+  gameLevel?: GameDifficultyLevel;
+  goalkeeperSlotsCount?: 1 | 2;
+  selectionMode?: MatchSlotMode;
+  slots?: MatchGoalkeeperSlot[];
+  operationalStatus?: MatchOperationalStatus;
+  acceptedAt?: string;
+  radiusKm?: number;
+  notifiedGoalkeepersCount?: number;
   notes?: string;
   paymentStatus?: 'pending' | 'paid' | 'failed' | 'refunded';
   createdAt?: string;
@@ -129,11 +167,15 @@ export interface MatchBooking {
   mvpGiven?: boolean;
   cleanSheetGiven?: boolean;
   penaltiesSavedGiven?: number;
-  // Linha do tempo de segurança & SOS
+  // Linha do tempo de segurança, rastreamento operacional (20m antes -> A Caminho) & SOS
   checkin2hConfirmed?: boolean;
   checkin2hConfirmedAt?: string;
   enRoute45mConfirmed?: boolean;
   enRoute45mAt?: string;
+  enRoute20mNotified?: boolean;
+  enRoute20mNotifiedAt?: string;
+  enRoute20mConfirmed?: boolean;
+  enRoute20mAt?: string;
   goalkeeperCancelled?: boolean;
   sosTriggered?: boolean;
   sosTriggeredAt?: string;
@@ -223,6 +265,9 @@ export interface NotificationItem {
   read: boolean;
   category: 'match' | 'wallet' | 'system' | 'radar';
   actionTab?: 'home' | 'chat' | 'wallet' | 'notifications';
+  matchId?: string;
+  arenaName?: string;
+  actionType?: 'confirm_en_route' | 'accept_match';
 }
 
 export interface Transaction {

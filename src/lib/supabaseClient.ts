@@ -16,9 +16,11 @@ import {
   MercadoPagoWebhookConfig,
   MercadoPagoWebhookEventType,
   MercadoPagoWebhookLog,
+  Goalkeeper,
 } from '../types';
 import { evaluateGoalkeeperArenaProximity, normalizeSearchText } from '../utils/arenaProximitySearch';
 import { classifyGoalkeeperTier, getMatchGoalkeeperNetPayout, getTierByTotalPrice, ITAPEVA_HOUSE_FEE } from '../utils/cachePricingAI';
+import { computeGoalkeeperDistanceKm, filterGoalkeepersWithinRadius } from '../utils/geoMatchmaking';
 import { validateCPF } from '../utils/validations';
 import {
   getOfflineAdminWithdrawals,
@@ -585,7 +587,7 @@ export async function queryGoalkeepersSmart(
       const { data, error } = await supabase
         .from('profiles')
         .select('*')
-        .eq('role', 'goleiro')
+        .in('role', ['goleiro', 'goalkeeper'])
         .order('rating', { ascending: false });
 
       if (!error && data && data.length > 0) {
@@ -616,7 +618,13 @@ export async function queryGoalkeepersSmart(
                     ? 'Campo 11'
                     : c.charAt(0).toUpperCase() + c.slice(1)
                 )
-              : ['Society', 'Fut7', 'Futsal', 'Campo 11'];
+              : ['Society', 'Fut7', 'Futsal', 'Campo 11', 'Areia'];
+
+          const computedDistKm = computeGoalkeeperDistanceKm({
+            profile: p,
+            targetCity: 'Itapeva - SP',
+            targetAddress: filters.arenaQuery,
+          });
 
           return {
             id: p.id,
@@ -629,7 +637,7 @@ export async function queryGoalkeepersSmart(
             cleanSheets: Number(p.clean_sheets || 0),
             penaltiesSaved: Number(p.penalties_saved || 0),
             pricePerMatch: pinnedValidPrice,
-            distanceKm: Number(p.distance_km ?? 3.0),
+            distanceKm: computedDistKm,
             neighborhood: p.neighborhood || 'Centro',
             city: p.city || 'Itapeva - SP',
             height: p.height || '1.85m',
@@ -646,6 +654,9 @@ export async function queryGoalkeepersSmart(
               `Goleiro oficial cadastrado na rede ParedãoGK (${p.city || 'Itapeva - SP'}).`,
             favoriteBrand: p.favorite_gloves || 'Luva Profissional',
             level: mappedLevel as any,
+            phone: p.phone || undefined,
+            latitude: typeof p.latitude === 'number' ? p.latitude : p.lat,
+            longitude: typeof p.longitude === 'number' ? p.longitude : p.lng,
           };
         });
       }
@@ -712,7 +723,7 @@ export async function fetchWeeklyGoalkeeperRanking(currentUserId?: string): Prom
       supabase
         .from('profiles')
         .select('*')
-        .eq('role', 'goleiro')
+        .in('role', ['goleiro', 'goalkeeper'])
         .order('rating', { ascending: false })
         .limit(20),
       supabase
@@ -849,6 +860,7 @@ export function subscribeToRealtimeBookingsAndNotifications(callbacks: {
   onNotification: (newRecord: any) => void;
   onMatchChange: (matchRecord: any, eventType: string) => void;
   onGoalkeeperCallAlert: (callData: any) => void;
+  onOperationalStatusChange?: (matchUpdate: any) => void;
 }) {
   const channel = supabase.channel('paredaogk-realtime-matches');
 
@@ -907,6 +919,33 @@ export function subscribeToRealtimeBookingsAndNotifications(callbacks: {
       console.log('[Supabase Realtime Broadcast: Reconvocação Semanal]', payload);
       callbacks.onGoalkeeperCallAlert(payload);
       playWhistleNotification();
+    }
+  );
+
+  // 5. Canal de Broadcast para Novas Convocações (Raio 30km) e Status Operacional ("A Caminho")
+  channel.on(
+    'broadcast',
+    { event: 'new_match_radar_alert' },
+    ({ payload }) => {
+      console.log('[Supabase Realtime Broadcast: Nova Convocação Radar 30km]', payload);
+      callbacks.onGoalkeeperCallAlert(payload);
+      playWhistleNotification();
+    }
+  );
+
+  channel.on(
+    'broadcast',
+    { event: 'match_operational_status' },
+    ({ payload }) => {
+      console.log('[Supabase Realtime Broadcast: Status Operacional Partida]', payload);
+      if (callbacks.onOperationalStatusChange) {
+        callbacks.onOperationalStatusChange(payload);
+      } else {
+        callbacks.onMatchChange(payload, 'UPDATE');
+      }
+      if (payload?.enRoute20mNotified || payload?.enRoute20mConfirmed) {
+        playWhistleNotification();
+      }
     }
   );
 
@@ -1180,8 +1219,8 @@ export async function triggerSosSubstitution(params: {
       const { data: profilesData, error } = await supabase
         .from('profiles')
         .select('id, name, nickname, neighborhood, city, distance_km')
-        .eq('role', 'goleiro')
-        .limit(20);
+        .in('role', ['goleiro', 'goalkeeper'])
+        .limit(30);
 
       if (!error && profilesData && profilesData.length > 0) {
         candidates = profilesData
@@ -1505,6 +1544,8 @@ export async function generateMercadoPagoPixCharge(params: {
   amount: number;
   userId?: string;
   goalkeeperId?: string;
+  goalkeeperIds?: string[];
+  slotsCount?: number;
   goalkeeperName?: string;
   arenaName?: string;
   description?: string;
@@ -1624,6 +1665,8 @@ export async function generateMercadoPagoPixCharge(params: {
         idempotencyKey,
         userId: authUserId,
         goalkeeperId: params.goalkeeperId,
+        goalkeeperIds: params.goalkeeperIds,
+        slotsCount: params.slotsCount,
         goalkeeperName: params.goalkeeperName,
         arenaName: params.arenaName,
         type: params.type || 'wallet_deposit',
@@ -2457,6 +2500,11 @@ export async function fetchMatchesFromSupabase(userId?: string): Promise<MatchBo
         cashbackEarned: Number(row.cashback_earned ?? Number((price * 0.1).toFixed(2))),
         status: row.status || 'confirmed',
         competitiveLevel: row.competitive_level || 'Competitivo',
+        gameLevel: row.game_level || row.competitive_level || 'Médio',
+        durationMinutes: row.duration_minutes ? Number(row.duration_minutes) : 60,
+        goalkeeperSlotsCount: row.goalkeeper_slots_count === 2 ? 2 : 1,
+        selectionMode: row.selection_mode || undefined,
+        operationalStatus: row.operational_status || (row.en_route_20m_confirmed || row.en_route_45m_confirmed ? 'en_route' : row.status === 'searching' ? 'awaiting_acceptance' : 'accepted'),
         ratingGiven: row.rating_given ? Number(row.rating_given) : undefined,
         reviewComment: row.review_comment || undefined,
         reviewTags: Array.isArray(row.review_tags) ? row.review_tags : undefined,
@@ -2470,6 +2518,9 @@ export async function fetchMatchesFromSupabase(userId?: string): Promise<MatchBo
         createdAt: row.created_at || undefined,
         checkin2hConfirmed: Boolean(row.checkin_2h_confirmed),
         enRoute45mConfirmed: Boolean(row.en_route_45m_confirmed),
+        enRoute20mNotified: Boolean(row.en_route_20m_notified),
+        enRoute20mConfirmed: Boolean(row.en_route_20m_confirmed || row.en_route_45m_confirmed),
+        enRoute20mAt: row.en_route_20m_at || undefined,
         goalkeeperCancelled: Boolean(row.goalkeeper_cancelled),
       };
     });
@@ -2498,17 +2549,27 @@ export async function fetchNotificationsFromSupabase(userId?: string): Promise<N
     const { data, error } = await query;
     if (error || !data) return [];
 
-    return data.map((row: any) => ({
-      id: String(row.id),
-      title: row.title || 'Notificação ParedãoGK',
-      description: row.description || '',
-      timestamp: row.created_at
-        ? new Date(row.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
-        : 'Agora',
-      read: Boolean(row.read),
-      category: (row.category || 'system') as NotificationItem['category'],
-      actionTab: row.category === 'wallet' ? 'wallet' : row.category === 'radar' ? 'home' : undefined,
-    }));
+    return data.map((row: any) => {
+      const titleText = String(row.title || 'Notificação ParedãoGK');
+      const descText = String(row.description || '');
+      const isEnRoutePrompt =
+        titleText.toLowerCase().includes('a caminho') ||
+        descText.toLowerCase().includes('está a caminho do jogo');
+      const isMatchInvite =
+        row.category === 'radar' || titleText.toLowerCase().includes('convocação') || titleText.toLowerCase().includes('bora jogar');
+      return {
+        id: String(row.id),
+        title: titleText,
+        description: descText,
+        timestamp: row.created_at
+          ? new Date(row.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
+          : 'Agora',
+        read: Boolean(row.read),
+        category: (row.category || 'system') as NotificationItem['category'],
+        actionTab: row.category === 'wallet' ? 'wallet' : row.category === 'radar' || row.category === 'match' ? 'home' : undefined,
+        actionType: isEnRoutePrompt ? 'confirm_en_route' : isMatchInvite ? 'accept_match' : undefined,
+      };
+    });
   } catch (err) {
     console.warn('[fetchNotificationsFromSupabase warning]', err);
     return [];
@@ -3119,6 +3180,363 @@ export function subscribeToAdminFinancialRealtime(callbacks: {
     }
   };
 }
+
+// ==========================================
+// 10. CONVOCAÇÃO INTELIGENTE ("BORA JOGAR!"), RAIO 30KM, EVOLUTION API & STATUS "A CAMINHO"
+// ==========================================
+
+export async function queryEligibleGoalkeepersWithinRadius(params: {
+  city?: string;
+  arenaName?: string;
+  address?: string;
+  modality?: ModalityType;
+  maxRadiusKm?: number;
+}): Promise<{ goalkeepers: Goalkeeper[]; totalInDb: number }> {
+  const radius = params.maxRadiusKm ?? 30;
+  const result = await queryGoalkeepersSmart({
+    region: 'todos',
+    technicalLevel: 'todos',
+    timeSlot: 'todos',
+    maxDistanceKm: radius,
+    modality: 'todos',
+    searchQuery: '',
+    arenaQuery: '',
+  });
+
+  const withinRadius = filterGoalkeepersWithinRadius(
+    result.goalkeepers as Goalkeeper[],
+    radius
+  );
+
+  return {
+    goalkeepers: withinRadius,
+    totalInDb: result.totalRealInDb,
+  };
+}
+
+export async function dispatchConvocationNotifications(params: {
+  matchId: string;
+  arenaName: string;
+  address: string;
+  city: string;
+  date: string;
+  time: string;
+  durationMinutes: number;
+  modality: ModalityType;
+  gameLevel: string;
+  price: number;
+  slotsCount: 1 | 2;
+  radiusKm?: number;
+  organizerName: string;
+  selectionMode: 'random' | 'specific' | 'mixed';
+  selectedGoalkeeperIds: string[];
+  eligibleGoalkeepers: Goalkeeper[];
+  bookingPayload?: MatchBooking;
+}): Promise<{
+  success: boolean;
+  eligibleCount: number;
+  panelNotifiedCount: number;
+  whatsappSentCount: number;
+  evolutionConfigured: boolean;
+}> {
+  try {
+    if (params.bookingPayload) {
+      const channel = supabase.channel('paredaogk-realtime-matches');
+      await channel
+        .send({
+          type: 'broadcast',
+          event: 'new_match_radar_alert',
+          payload: params.bookingPayload,
+        })
+        .catch(() => undefined);
+    }
+
+    const res = await fetch('/api/convocacao/notificar-goleiros', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...params,
+        eligibleGoalkeepers: params.eligibleGoalkeepers.map((gk) => ({
+          id: gk.id,
+          name: gk.name,
+          phone: gk.phone,
+          city: gk.city,
+          neighborhood: gk.neighborhood,
+          distanceKm: gk.distanceKm,
+        })),
+      }),
+    });
+
+    const parsed = await safeParseJsonResponse<{
+      success: boolean;
+      eligibleCount?: number;
+      panelNotifiedCount?: number;
+      whatsappSentCount?: number;
+      evolutionConfigured?: boolean;
+    }>(res, 'Notificação de Convocação 30km');
+
+    if (parsed.valid && parsed.data) {
+      return {
+        success: Boolean(parsed.data.success),
+        eligibleCount: Number(parsed.data.eligibleCount ?? params.eligibleGoalkeepers.length),
+        panelNotifiedCount: Number(parsed.data.panelNotifiedCount ?? 0),
+        whatsappSentCount: Number(parsed.data.whatsappSentCount ?? 0),
+        evolutionConfigured: Boolean(parsed.data.evolutionConfigured),
+      };
+    }
+  } catch (err) {
+    console.warn('[dispatchConvocationNotifications warning]', err);
+  }
+
+  return {
+    success: true,
+    eligibleCount: params.eligibleGoalkeepers.length,
+    panelNotifiedCount: 0,
+    whatsappSentCount: 0,
+    evolutionConfigured: false,
+  };
+}
+
+export async function confirmMatchCustodySplit(params: {
+  match: MatchBooking;
+  payerUserId?: string;
+  payerEmail?: string;
+  paymentMethod: 'wallet' | 'pix' | 'homologation';
+  paymentId?: string;
+}): Promise<{
+  success: boolean;
+  totalHouseFee: number;
+  totalNetCustody: number;
+  netPerSlot: number;
+  supabaseCredited: boolean;
+}> {
+  const slotsCount = params.match.goalkeeperSlotsCount === 2 ? 2 : 1;
+  const fallbackFee = Math.min(params.match.price, ITAPEVA_HOUSE_FEE * slotsCount);
+  const fallbackNet = Number(Math.max(0, params.match.price - fallbackFee).toFixed(2));
+
+  try {
+    const res = await fetch('/api/convocacao/confirmar-custodia', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+
+    const parsed = await safeParseJsonResponse<{
+      success: boolean;
+      totalHouseFee?: number;
+      totalNetCustody?: number;
+      netPerSlot?: number;
+      supabaseCredited?: boolean;
+    }>(res, 'Confirmação de Custódia e Taxa da Casa');
+
+    if (parsed.valid && parsed.data?.success) {
+      return {
+        success: true,
+        totalHouseFee: Number(parsed.data.totalHouseFee ?? fallbackFee),
+        totalNetCustody: Number(parsed.data.totalNetCustody ?? fallbackNet),
+        netPerSlot: Number(parsed.data.netPerSlot ?? fallbackNet / slotsCount),
+        supabaseCredited: Boolean(parsed.data.supabaseCredited),
+      };
+    }
+  } catch (err) {
+    console.warn('[confirmMatchCustodySplit warning]', err);
+  }
+
+  return {
+    success: false,
+    totalHouseFee: fallbackFee,
+    totalNetCustody: fallbackNet,
+    netPerSlot: Number((fallbackNet / slotsCount).toFixed(2)),
+    supabaseCredited: false,
+  };
+}
+
+export async function acceptMatchVacancyInSupabase(params: {
+  match: MatchBooking;
+  goalkeeper: Pick<UserProfile, 'id' | 'name' | 'nickname' | 'avatarUrl'>;
+}): Promise<{ synced: boolean; updatedMatch: MatchBooking }> {
+  const nowIso = new Date().toISOString();
+  const displayName = params.goalkeeper.nickname
+    ? `${params.goalkeeper.name} (${params.goalkeeper.nickname})`
+    : params.goalkeeper.name;
+
+  const updatedSlots = (params.match.slots || []).map((slot, idx) =>
+    idx === 0 || !slot.goalkeeperId
+      ? {
+          ...slot,
+          mode: slot.mode,
+          goalkeeperId: params.goalkeeper.id,
+          goalkeeperName: displayName,
+          goalkeeperPhoto: params.goalkeeper.avatarUrl,
+          status: 'accepted' as const,
+        }
+      : slot
+  );
+
+  const updatedMatch: MatchBooking = {
+    ...params.match,
+    goalkeeperId: params.match.goalkeeperId || params.goalkeeper.id,
+    goalkeeperName: params.match.goalkeeperName && !params.match.goalkeeperName.includes('Aguardando')
+      ? params.match.goalkeeperName
+      : displayName,
+    goalkeeperPhoto: params.match.goalkeeperPhoto || params.goalkeeper.avatarUrl,
+    status: 'confirmed',
+    operationalStatus: 'accepted',
+    acceptedAt: nowIso,
+    slots: updatedSlots.length > 0 ? updatedSlots : params.match.slots,
+  };
+
+  let synced = false;
+  try {
+    const channel = supabase.channel('paredaogk-realtime-matches');
+    await channel
+      .send({
+        type: 'broadcast',
+        event: 'match_operational_status',
+        payload: updatedMatch,
+      })
+      .catch(() => undefined);
+
+    if (isSupabaseConfigured) {
+      const { error } = await supabase
+        .from('matches')
+        .update({
+          status: 'confirmed',
+          goalkeeper_id: updatedMatch.goalkeeperId,
+          goalkeeper_name: updatedMatch.goalkeeperName,
+        })
+        .eq('id', params.match.id);
+
+      if (params.match.organizerId && params.match.organizerId !== 'usr-guest') {
+        await supabase.from('notifications').insert([
+          {
+            id: `notif-acc-${Date.now()}`,
+            user_id: params.match.organizerId,
+            category: 'match',
+            title: `🧤 ${displayName} aceitou a partida!`,
+            description: `Sua convocação em ${params.match.arenaName} (${params.match.date} · ${params.match.time}) foi aceita pelo goleiro.`,
+            read: false,
+            created_at: nowIso,
+          },
+        ]);
+      }
+      synced = !error;
+    }
+  } catch (err) {
+    console.warn('[acceptMatchVacancyInSupabase warning]', err);
+  }
+
+  playWhistleNotification();
+  return { synced, updatedMatch };
+}
+
+export async function trigger20MinEnRouteNotificationInSupabase(params: {
+  match: MatchBooking;
+  goalkeeperUserId?: string;
+}): Promise<{ synced: boolean; updatedMatch: MatchBooking }> {
+  const nowIso = new Date().toISOString();
+  const updatedMatch: MatchBooking = {
+    ...params.match,
+    enRoute20mNotified: true,
+    enRoute20mNotifiedAt: nowIso,
+  };
+
+  let synced = false;
+  try {
+    const channel = supabase.channel('paredaogk-realtime-matches');
+    await channel
+      .send({
+        type: 'broadcast',
+        event: 'match_operational_status',
+        payload: updatedMatch,
+      })
+      .catch(() => undefined);
+
+    const targetGkId = params.goalkeeperUserId || params.match.goalkeeperId;
+    if (isSupabaseConfigured && targetGkId && targetGkId !== 'usr-guest') {
+      const { error } = await supabase.from('notifications').insert([
+        {
+          id: `notif-20m-${Date.now()}`,
+          user_id: targetGkId,
+          category: 'match',
+          title: `⏰ Você está a caminho do jogo em ${params.match.arenaName}?`,
+          description: `Faltam 20 minutos para o início (${params.match.time}). Toque em SIM para atualizar o painel do contratante para "A Caminho".`,
+          read: false,
+          created_at: nowIso,
+        },
+      ]);
+      synced = !error;
+    }
+  } catch (err) {
+    console.warn('[trigger20MinEnRouteNotificationInSupabase warning]', err);
+  }
+
+  playWhistleNotification();
+  return { synced, updatedMatch };
+}
+
+export async function confirmGoalkeeperEnRoute20mInSupabase(params: {
+  match: MatchBooking;
+  goalkeeperName?: string;
+}): Promise<{ synced: boolean; updatedMatch: MatchBooking }> {
+  const nowIso = new Date().toISOString();
+  const nowTime = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+  const updatedMatch: MatchBooking = {
+    ...params.match,
+    status: 'confirmed',
+    operationalStatus: 'en_route',
+    enRoute20mNotified: true,
+    enRoute20mConfirmed: true,
+    enRoute20mAt: nowTime,
+    enRoute45mConfirmed: true,
+    enRoute45mAt: nowTime,
+    goalkeeperCancelled: false,
+  };
+
+  let synced = false;
+  try {
+    const channel = supabase.channel('paredaogk-realtime-matches');
+    await channel
+      .send({
+        type: 'broadcast',
+        event: 'match_operational_status',
+        payload: updatedMatch,
+      })
+      .catch(() => undefined);
+
+    if (isSupabaseConfigured) {
+      const { error } = await supabase
+        .from('matches')
+        .update({
+          en_route_45m_confirmed: true,
+          goalkeeper_cancelled: false,
+        })
+        .eq('id', params.match.id);
+
+      if (params.match.organizerId && params.match.organizerId !== 'usr-guest') {
+        await supabase.from('notifications').insert([
+          {
+            id: `notif-enroute-${Date.now()}`,
+            user_id: params.match.organizerId,
+            category: 'match',
+            title: `🚗 Goleiro A Caminho de ${params.match.arenaName}!`,
+            description: `${params.goalkeeperName || params.match.goalkeeperName || 'Seu goleiro'} confirmou às ${nowTime} que já está a caminho da partida (${params.match.time}).`,
+            read: false,
+            created_at: nowIso,
+          },
+        ]);
+      }
+      synced = !error;
+    }
+  } catch (err) {
+    console.warn('[confirmGoalkeeperEnRoute20mInSupabase warning]', err);
+  }
+
+  playWhistleNotification();
+  return { synced, updatedMatch };
+}
+
 
 
 

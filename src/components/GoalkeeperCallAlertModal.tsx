@@ -43,8 +43,10 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
   };
 
   const totalValue = booking.price || 25;
-  const feeSplit = getGoalkeeperNetAndFee(totalValue, booking.houseFee);
-  const netCacheValue = booking.goalkeeperPayout ?? feeSplit.goalkeeperNet;
+  const slotsCount = booking.goalkeeperSlotsCount === 2 ? 2 : 1;
+  const totalFee = booking.houseFee ?? 5 * slotsCount;
+  const totalNet = booking.goalkeeperPayout ?? Math.max(0, totalValue - totalFee);
+  const netCacheValue = Number((totalNet / slotsCount).toFixed(2));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/65 dark:bg-black/90 backdrop-blur-md overflow-y-auto">
@@ -55,8 +57,8 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
         transition={{ type: 'spring', damping: 22, stiffness: 220 }}
         className="relative w-full max-w-lg bg-white dark:bg-slate-900 border-2 border-emerald-500/80 rounded-3xl shadow-[0_0_50px_rgba(34,197,94,0.22)] dark:shadow-[0_0_50px_rgba(34,197,94,0.3)] overflow-hidden my-6 transition-colors"
       >
-        {/* Animated Neon Pulse Accent Top */}
-        <div className="h-2.5 w-full bg-gradient-to-r from-emerald-400 via-sky-400 to-emerald-400 animate-pulse" />
+        {/* Accent Top Bar */}
+        <div className="h-2 w-full bg-gradient-to-r from-[#22c55e] via-[#38bdf8] to-[#22c55e]" />
 
         {/* Modal Header */}
         <div className="p-6 pb-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/80">
@@ -64,42 +66,37 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
             <div className="flex items-center gap-3">
               <div className="relative">
                 <div className="w-12 h-12 rounded-2xl bg-emerald-500/15 dark:bg-emerald-500/20 border border-emerald-500/50 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shadow-lg shadow-emerald-500/20">
-                  <GkWhistleIcon className="w-6 h-6 text-emerald-600 dark:text-emerald-400 animate-pulse" />
+                  <GkWhistleIcon className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
                 </div>
-                <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
-                </span>
               </div>
 
               <div>
                 <div className="flex items-center gap-2">
                   <span
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-[10px] font-mono font-bold ${
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md border text-[10px] font-mono font-bold ${
                       booking.sosTriggered
                         ? 'bg-sky-500/20 border-sky-500/50 text-sky-700 dark:text-[#38bdf8]'
-                        : 'bg-emerald-500/15 dark:bg-emerald-500/20 border-emerald-500/40 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-emerald-500/15 dark:bg-emerald-500/20 border-emerald-500/40 text-emerald-700 dark:text-[#22c55e]'
                     }`}
                   >
-                    <GkWhistleIcon className="w-3 h-3 text-emerald-600 dark:text-emerald-400 animate-pulse" />
                     {booking.sosTriggered
-                      ? `ALERTA SOS · +R$ ${booking.sosBonus || 5} BÔNUS URGÊNCIA`
+                      ? `ALERTA SOS · +R$ ${booking.sosBonus || 5} BÔNUS`
                       : booking.isWeeklyRecurrence
-                      ? 'RECONVOCAÇÃO SEMANAL PRIORITÁRIA'
-                      : 'SUPABASE REALTIME · MERCADO PAGO PIX'}
+                      ? 'RECONVOCAÇÃO SEMANAL'
+                      : `RADAR ${booking.radiusKm || 30} KM · TEMPO REAL`}
                   </span>
                 </div>
                 <h2 className="font-display font-extrabold text-lg text-slate-900 dark:text-white mt-1 tracking-tight">
                   {booking.sosTriggered
-                    ? '🚨 Substituição Relâmpago SOS!'
+                    ? 'Substituição Relâmpago SOS!'
                     : booking.isWeeklyRecurrence
-                    ? '⭐ Convite Prioritário: Próxima Semana!'
-                    : '🚨 Nova Convocação Confirmada!'}
+                    ? 'Convite Prioritário: Próxima Semana!'
+                    : 'Nova Convocação · Bora Jogar!'}
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   {booking.sosTriggered
-                    ? `Vaga urgente num raio de ${booking.sosRadiusKm || 10}km com bônus garantido no Pix.`
-                    : 'Pagamento liquidado via Pix. Cachê em custódia segura.'}
+                    ? `Vaga urgente num raio de ${booking.sosRadiusKm || 30}km com bônus garantido.`
+                    : `${slotsCount} vaga(s) aberta(s) · Cachê retido em custódia segura.`}
                 </p>
               </div>
             </div>
@@ -109,7 +106,7 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
                 type="button"
                 onClick={handleTestSound}
                 title="Tocar apito de alerta"
-                className="w-8 h-8 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400 flex items-center justify-center transition-colors cursor-pointer"
+                className="w-9 h-9 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400 flex items-center justify-center transition-colors cursor-pointer"
               >
                 <GkWhistleIcon className="w-4 h-4" />
               </button>
@@ -117,7 +114,7 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
               <button
                 type="button"
                 onClick={onClose}
-                className="w-8 h-8 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                className="w-9 h-9 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white flex items-center justify-center transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -131,21 +128,21 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
           <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 to-slate-50 dark:from-emerald-950/60 dark:to-slate-950 border border-emerald-500/40 flex items-center justify-between shadow-md">
             <div>
               <span className="text-[11px] font-mono uppercase tracking-wider text-slate-600 dark:text-slate-400 block">
-                Cachê Garantido via Pix (Líquido GK)
+                Cachê Garantido em Custódia (Líquido/Vaga)
               </span>
-              <div className="font-mono text-2xl font-extrabold text-emerald-600 dark:text-emerald-400 mt-0.5">
+              <div className="font-mono tabular-nums text-2xl font-extrabold text-emerald-600 dark:text-[#22c55e] mt-0.5">
                 {formatCurrency(netCacheValue)}
               </div>
               <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
-                Total Pix {formatCurrency(totalValue)} · Taxa fixa casa {formatCurrency(feeSplit.houseFee)}
+                Total {formatCurrency(totalValue)} ({slotsCount} vaga{slotsCount > 1 ? 's' : ''}) · Taxa casa {formatCurrency(totalFee)}
               </span>
             </div>
             <div className="text-right">
-              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-sky-700 dark:text-sky-400 bg-sky-500/10 px-2.5 py-1 rounded-full border border-sky-500/30">
-                <Zap className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
-                Custódia Instantânea
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-sky-700 dark:text-[#38bdf8] bg-sky-500/10 px-2.5 py-1 rounded-md border border-sky-500/30">
+                <Zap className="w-3.5 h-3.5" />
+                Custódia Protegida
               </span>
-              <div className="text-[10px] text-slate-500 mt-1">Mercado Pago Gateway</div>
+              <div className="text-[10px] text-slate-500 mt-1">Raio {booking.radiusKm || 30} km</div>
             </div>
           </div>
 
@@ -157,7 +154,7 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
                 <span className="font-bold text-slate-900 dark:text-white text-sm block">
                   {booking.arenaName}
                 </span>
-                <span className="text-slate-500 dark:text-slate-400 text-xs">{booking.address || 'São Paulo - SP'}</span>
+                <span className="text-slate-500 dark:text-slate-400 text-xs">{booking.address || 'Itapeva - SP'}</span>
               </div>
             </div>
 
@@ -168,14 +165,17 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
               </div>
               <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
                 <Clock className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                <span>{booking.time}</span>
+                <span>
+                  {booking.time}
+                  {booking.durationMinutes ? ` (${booking.durationMinutes} min)` : ''}
+                </span>
               </div>
             </div>
 
             <div className="pt-2 border-t border-slate-200 dark:border-slate-800/80 flex items-center justify-between text-slate-500 dark:text-slate-400">
               <span>Modalidade: <strong className="text-slate-900 dark:text-white">{booking.modality}</strong></span>
-              <span className="px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-mono text-[10px]">
-                {booking.competitiveLevel || 'Competitivo'}
+              <span className="px-2 py-0.5 rounded-md bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-mono text-[10px]">
+                Nível: {booking.gameLevel || booking.competitiveLevel || 'Médio'}
               </span>
             </div>
 

@@ -61,6 +61,9 @@ interface HomeTabProps {
   onOpenFutshop: () => void;
   recentBooking?: MatchBooking | null;
   onOpenReviewModal?: (booking: MatchBooking) => void;
+  onAcceptMatchVacancy?: (match: MatchBooking) => Promise<void> | void;
+  onTrigger20MinEnRouteAlert?: (match: MatchBooking) => Promise<void> | void;
+  onConfirmEnRoute20m?: (match: MatchBooking) => Promise<void> | void;
   onOpenHistory?: () => void;
   onOpenPerformance?: () => void;
   onOpenAuth?: () => void;
@@ -91,7 +94,7 @@ const INITIAL_FILTERS: SmartFilterCriteria = {
   region: 'todos',
   technicalLevel: 'todos',
   timeSlot: 'todos',
-  maxDistanceKm: 25,
+  maxDistanceKm: 30,
   modality: 'todos',
   searchQuery: '',
   arenaQuery: '',
@@ -113,6 +116,9 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   onOpenFutshop,
   recentBooking,
   onOpenReviewModal,
+  onAcceptMatchVacancy,
+  onTrigger20MinEnRouteAlert,
+  onConfirmEnRoute20m,
   onOpenHistory,
   onOpenPerformance,
   onOpenAuth,
@@ -248,7 +254,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
               className="h-12 px-5 rounded-2xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 active:scale-[0.97] text-slate-950 font-bold text-xs sm:text-sm flex items-center gap-2.5 shadow-lg shadow-emerald-500/25 transition-all cursor-pointer touch-manipulation select-none"
             >
               <GkGloveBallIcon className="w-5 h-5 text-slate-950" />
-              <span>Convocação Inteligente de Goleiro</span>
+              <span>Bora Jogar! · Convocar Goleiro</span>
             </button>
 
             <button
@@ -305,6 +311,9 @@ export const HomeTab: React.FC<HomeTabProps> = ({
           userRole={user.role}
           allGoalkeepers={goalkeepers}
           onOpenReviewModal={onOpenReviewModal}
+          onAcceptMatchVacancy={onAcceptMatchVacancy}
+          onTrigger20MinEnRouteAlert={onTrigger20MinEnRouteAlert}
+          onConfirmEnRoute20m={onConfirmEnRoute20m}
           onUpdateSafetyStatus={onUpdateMatchSafetyStatus}
           onTriggerSos={onTriggerSos}
           onReinviteNextWeek={onReinviteNextWeek}
@@ -463,6 +472,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
               { id: 'fut7', label: 'Fut7' },
               { id: 'futsal', label: 'Futsal' },
               { id: 'campo', label: 'Campo 11' },
+              { id: 'areia', label: 'Areia' },
             ].map((f) => (
               <button
                 type="button"
