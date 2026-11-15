@@ -16,6 +16,7 @@ import {
   triggerSosSubstitution,
   seedAndFetchArenasFromSupabase,
   fetchMatchesFromSupabase,
+  fetchOpenRadarMatches,
   fetchAdminPixWithdrawalsFromSupabase,
   fetchOrCreateSupabaseProfile,
   isAuthorizedAdmin,
@@ -168,6 +169,9 @@ export default function App() {
   const [isTermsModalOpen, setIsTermsModalOpen] = useState(false);
   const [isAvatarModalOpen, setIsAvatarModalOpen] = useState(false);
   const [isProfilePricingModalOpen, setIsProfilePricingModalOpen] = useState(false);
+  const [isRadarActivationMode, setIsRadarActivationMode] = useState(false);
+  const [radarRefreshTick, setRadarRefreshTick] = useState(0);
+  const [isRefreshingRadar, setIsRefreshingRadar] = useState(false);
   const [isArenaSubmissionOpen, setIsArenaSubmissionOpen] = useState(false);
   const [isArenaModerationOpen, setIsArenaModerationOpen] = useState(false);
   const [isAdminFinancialOpen, setIsAdminFinancialOpen] = useState(false);
@@ -338,20 +342,38 @@ export default function App() {
     }).then(({ synced }) => setIsRetentionSynced(synced));
   }, [weeklyTemplates, favoriteGoalkeeperIds, currentUser.id]);
 
-  // Sincronização de partidas oficiais do usuário direto do Supabase
-  useEffect(() => {
-    if (!isSupabaseConfigured || !currentUser.id || currentUser.id === 'usr-guest') return;
-    fetchMatchesFromSupabase(currentUser.id).then((remoteMatches) => {
-      if (remoteMatches.length > 0) {
+  // Sincronização de partidas oficiais do usuário + partidas abertas no radar (30 km)
+  const handleRefreshRadarMatches = async () => {
+    setIsRefreshingRadar(true);
+    try {
+      const [remoteMatches, openRadarMatches] = await Promise.all([
+        currentUser.id && currentUser.id !== 'usr-guest'
+          ? fetchMatchesFromSupabase(currentUser.id)
+          : Promise.resolve([]),
+        fetchOpenRadarMatches(),
+      ]);
+
+      const incoming = [...openRadarMatches, ...remoteMatches];
+      if (incoming.length > 0) {
         setMatches((prev) => {
           const map = new Map<string, MatchBooking>();
           prev.forEach((m) => map.set(m.id, m));
-          remoteMatches.forEach((rm) => map.set(rm.id, rm));
+          incoming.forEach((rm) => {
+            const existing = map.get(rm.id);
+            map.set(rm.id, existing ? { ...existing, ...rm, candidates: rm.candidates || existing.candidates } : rm);
+          });
           return Array.from(map.values());
         });
       }
-    });
-  }, [currentUser.id]);
+      setRadarRefreshTick((prev) => prev + 1);
+    } finally {
+      setIsRefreshingRadar(false);
+    }
+  };
+
+  useEffect(() => {
+    handleRefreshRadarMatches();
+  }, [currentUser.id, currentUser.role]);
 
   // Seed e sincronização inicial das Arenas Reais de Itapeva (SP) com Supabase
   useEffect(() => {
@@ -1093,6 +1115,7 @@ export default function App() {
       saveOfflineUserProfile(updated);
       return updated;
     });
+    setRadarRefreshTick((prev) => prev + 1);
   };
 
   // Handle Logout (limpa cache local, encerra sessão real Supabase e volta para autenticação)
@@ -1260,6 +1283,13 @@ export default function App() {
             onOpenHistory={() => setIsHistoryModalOpen(true)}
             onOpenPerformance={() => setCurrentTab('performance')}
             onOpenAuth={() => setIsAuthModalOpen(true)}
+            onOpenGoalkeeperRadarSignup={() => {
+              setIsRadarActivationMode(true);
+              setIsProfilePricingModalOpen(true);
+            }}
+            onRefreshRadarMatches={handleRefreshRadarMatches}
+            isRefreshingRadar={isRefreshingRadar}
+            radarRefreshTick={radarRefreshTick}
             onSaveWeeklyTemplate={handleSaveWeeklyTemplate}
             onDeleteWeeklyTemplate={handleDeleteWeeklyTemplate}
             onUseWeeklyTemplate={handleUseWeeklyTemplate}
@@ -1397,10 +1427,14 @@ export default function App() {
       {/* Profile Settings & Cachê AI Pricing Modal */}
       <ProfilePricingModal
         isOpen={isProfilePricingModalOpen}
-        onClose={() => setIsProfilePricingModalOpen(false)}
+        onClose={() => {
+          setIsProfilePricingModalOpen(false);
+          setIsRadarActivationMode(false);
+        }}
         user={currentUser}
         onSaveProfile={handleSaveProfilePricing}
         onOpenAvatarModal={() => setIsAvatarModalOpen(true)}
+        initialActivateRadar={isRadarActivationMode}
       />
 
       {/* Arena Submission Modal (Status automático: pending) */}

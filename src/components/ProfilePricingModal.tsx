@@ -26,7 +26,15 @@ interface ProfilePricingModalProps {
   user: UserProfile;
   onSaveProfile: (updates: Partial<UserProfile>) => void;
   onOpenAvatarModal?: () => void;
+  initialActivateRadar?: boolean;
 }
+
+const GK_CATEGORY_OPTIONS: { id: 'society' | 'futsal' | 'campo' | 'areia'; label: string }[] = [
+  { id: 'society', label: 'Society / Fut7' },
+  { id: 'futsal', label: 'Futsal' },
+  { id: 'campo', label: 'Campo 11' },
+  { id: 'areia', label: 'Areia / Beach' },
+];
 
 export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
   isOpen,
@@ -34,6 +42,7 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
   user,
   onSaveProfile,
   onOpenAvatarModal,
+  initialActivateRadar = false,
 }) => {
   const autoTier = useMemo(
     () =>
@@ -49,6 +58,16 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
   const [neighborhood, setNeighborhood] = useState(user.neighborhood || '');
   const [city, setCity] = useState(user.city || 'Itapeva - SP');
   const [favoriteGloves, setFavoriteGloves] = useState(user.favoriteGloves || '');
+  const [height, setHeight] = useState(user.height || '1.86m');
+  const [dominantFoot, setDominantFoot] = useState<'destro' | 'canhoto' | 'ambidestro'>(
+    user.dominantFoot || 'destro'
+  );
+  const [categories, setCategories] = useState<('society' | 'campo' | 'futsal' | 'areia')[]>(
+    user.categories && user.categories.length > 0 ? user.categories : ['society', 'futsal']
+  );
+  const [activateRadar, setActivateRadar] = useState<boolean>(
+    initialActivateRadar || user.role === 'goleiro'
+  );
   const [tierPinned, setTierPinned] = useState<boolean>(Boolean(user.tierPinned));
   const [technicalLevel, setTechnicalLevel] = useState<TechnicalLevelOption>(
     user.technicalLevel || technicalLevelToTierOption(autoTier.tierCode)
@@ -67,6 +86,12 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
     setNeighborhood(user.neighborhood || '');
     setCity(user.city || 'Itapeva - SP');
     setFavoriteGloves(user.favoriteGloves || '');
+    setHeight(user.height || '1.86m');
+    setDominantFoot(user.dominantFoot || 'destro');
+    setCategories(
+      user.categories && user.categories.length > 0 ? user.categories : ['society', 'futsal']
+    );
+    setActivateRadar(initialActivateRadar || user.role === 'goleiro');
     setTierPinned(Boolean(user.tierPinned));
     const initialPrice =
       user.tierPinned && user.preferredCache && [20, 25, 30].includes(user.preferredCache)
@@ -76,12 +101,21 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
     setTechnicalLevel(
       user.technicalLevel || technicalLevelToTierOption(getTierByTotalPrice(initialPrice).tierCode)
     );
-  }, [isOpen, user, autoTier]);
+  }, [isOpen, user, autoTier, initialActivateRadar]);
 
   if (!isOpen) return null;
 
   const activeTier = getTierByTotalPrice(preferredCache);
   const feeSplit = getGoalkeeperNetAndFee(activeTier.totalPrice);
+
+  const handleToggleCategory = (catId: 'society' | 'futsal' | 'campo' | 'areia') => {
+    setCategories((prev) => {
+      if (prev.includes(catId)) {
+        return prev.length > 1 ? prev.filter((item) => item !== catId) : prev;
+      }
+      return [...prev, catId];
+    });
+  };
 
   const handleSelectTier = (tierCode: PricingTierCode, pinned: boolean) => {
     const chosen =
@@ -95,21 +129,39 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
     e.preventDefault();
     setIsSaving(true);
     try {
+      const nextRole = activateRadar ? 'goleiro' : user.role;
+      const cleanNickname = nickname.trim() || user.nickname || 'Paredão GK';
+      const cleanNeighborhood = neighborhood.trim() || user.neighborhood || 'Centro';
+      const cleanCity = city.trim() || user.city || 'Itapeva - SP';
+      const cleanGloves = favoriteGloves.trim() || user.favoriteGloves || 'Luva Profissional';
+      const cleanHeight = height.trim() || user.height || '1.86m';
+
       await updateUserPricingProfileInSupabase({
         userId: user.id,
+        email: user.email,
+        name: user.name,
         preferredCache: activeTier.totalPrice,
         technicalLevel,
-        nickname: nickname.trim() || user.nickname,
-        neighborhood: neighborhood.trim() || user.neighborhood,
-        city: city.trim() || user.city,
-        favoriteGloves: favoriteGloves.trim() || user.favoriteGloves,
+        nickname: cleanNickname,
+        neighborhood: cleanNeighborhood,
+        city: cleanCity,
+        favoriteGloves: cleanGloves,
+        role: nextRole,
+        availableToday: activateRadar,
+        height: cleanHeight,
+        dominantFoot,
+        categories,
       });
 
       onSaveProfile({
-        nickname: nickname.trim() || user.nickname,
-        neighborhood: neighborhood.trim() || user.neighborhood,
-        city: city.trim() || user.city,
-        favoriteGloves: favoriteGloves.trim() || user.favoriteGloves,
+        role: nextRole,
+        nickname: cleanNickname,
+        neighborhood: cleanNeighborhood,
+        city: cleanCity,
+        favoriteGloves: cleanGloves,
+        height: cleanHeight,
+        dominantFoot,
+        categories,
         technicalLevel,
         preferredCache: activeTier.totalPrice,
         pricingTier: activeTier.tierCode,
@@ -138,10 +190,14 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
               </div>
               <div>
                 <h2 className="font-display font-bold text-base text-slate-900 dark:text-white">
-                  Configurações de Perfil & Faixa de Cachê (Itapeva-SP)
+                  {initialActivateRadar
+                    ? 'Cadastro no Radar Oficial de Goleiros · Raio 30 km'
+                    : 'Configurações de Perfil & Faixa de Cachê (Itapeva-SP)'}
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Classificação automática por nota/jogos ou fixação nas 3 faixas oficiais
+                  {initialActivateRadar
+                    ? 'Preencha seus dados de atleta vinculados à sua conta atual para aparecer na vitrine'
+                    : 'Classificação automática por nota/jogos ou fixação nas 3 faixas oficiais'}
                 </p>
               </div>
             </div>
@@ -181,7 +237,7 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
                     {user.name}
                   </div>
                   <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate flex items-center gap-1.5">
-                    <span>{user.role === 'goleiro' ? 'Goleiro GK' : 'Contratante / Capitão'}</span>
+                    <span>{activateRadar ? 'Goleiro GK (No Radar)' : user.role === 'goleiro' ? 'Goleiro GK' : 'Contratante / Capitão'}</span>
                     <span>·</span>
                     <span className="inline-flex items-center gap-0.5 font-mono text-emerald-600 dark:text-[#22c55e] font-bold">
                       <Star className="w-3 h-3 fill-emerald-500 dark:fill-[#22c55e]" />
@@ -206,6 +262,31 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
                   <span>Trocar Foto</span>
                 </button>
               )}
+            </div>
+
+            {/* Ativação no Radar Oficial de Goleiros */}
+            <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/35 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                  Aparecer no Radar Oficial de Goleiros (Raio 30 km)
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-0.5">
+                  Cataloga sua conta na base de goleiros para receber convocações de partidas próximas e aparecer para capitães.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={activateRadar}
+                onClick={() => setActivateRadar((prev) => !prev)}
+                className={`px-3.5 py-2 rounded-xl text-xs font-extrabold border transition-all cursor-pointer shrink-0 ${
+                  activateRadar
+                    ? 'bg-[#22c55e] border-[#22c55e] text-slate-950 shadow-md shadow-emerald-500/20'
+                    : 'bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                {activateRadar ? '✓ Ativo no Radar' : 'Ativar no Radar'}
+              </button>
             </div>
 
             {/* Dados do Perfil */}
@@ -260,6 +341,62 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
                   placeholder="Ex: Poker Deep Grip Pro"
                   className="w-full h-10 px-3 rounded-xl bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-white focus:border-emerald-500 focus:outline-none"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Altura (m)
+                </label>
+                <input
+                  type="text"
+                  value={height}
+                  onChange={(e) => setHeight(e.target.value)}
+                  placeholder="Ex: 1.88m"
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-white focus:border-emerald-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Pé Dominante
+                </label>
+                <select
+                  value={dominantFoot}
+                  onChange={(e) =>
+                    setDominantFoot(e.target.value as 'destro' | 'canhoto' | 'ambidestro')
+                  }
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-white focus:border-emerald-500 focus:outline-none"
+                >
+                  <option value="destro">Destro</option>
+                  <option value="canhoto">Canhoto</option>
+                  <option value="ambidestro">Ambidestro</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Modalidades que o Goleiro atua */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Modalidades em que você atua
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {GK_CATEGORY_OPTIONS.map((cat) => {
+                  const selected = categories.includes(cat.id);
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => handleToggleCategory(cat.id)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                        selected
+                          ? 'bg-[#22c55e] border-[#22c55e] text-slate-950 font-bold'
+                          : 'bg-slate-50 dark:bg-[#020617] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:border-emerald-500/40'
+                      }`}
+                    >
+                      {selected ? `✓ ${cat.label}` : cat.label}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -370,7 +507,13 @@ export const ProfilePricingModal: React.FC<ProfilePricingModalProps> = ({
                   className="px-5 py-2.5 rounded-xl bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-xs flex items-center gap-1.5 shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
                 >
                   <Check className="w-4 h-4" />
-                  <span>{isSaving ? 'Salvando...' : 'Salvar Perfil & Faixa'}</span>
+                  <span>
+                    {isSaving
+                      ? 'Salvando...'
+                      : activateRadar
+                      ? 'Salvar & Ativar no Radar'
+                      : 'Salvar Perfil & Faixa'}
+                  </span>
                 </button>
               </div>
             </div>

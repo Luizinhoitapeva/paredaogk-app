@@ -28,6 +28,7 @@ import {
 import { UserProfile, Goalkeeper, MatchBooking, MatchGoalkeeperCandidate, WeeklyMatchTemplate, ArenaField } from '../types';
 import { formatCurrency } from '../utils/validations';
 import { classifyGoalkeeperTier, getGoalkeeperNetAndFee, ITAPEVA_PRICING_TIERS } from '../utils/cachePricingAI';
+import { computeGoalkeeperDistanceKm } from '../utils/geoMatchmaking';
 import {
   evaluateGoalkeeperArenaProximity,
   findMatchingArenasFromMatches,
@@ -71,6 +72,10 @@ interface HomeTabProps {
   onOpenHistory?: () => void;
   onOpenPerformance?: () => void;
   onOpenAuth?: () => void;
+  onOpenGoalkeeperRadarSignup?: () => void;
+  onRefreshRadarMatches?: () => Promise<void> | void;
+  isRefreshingRadar?: boolean;
+  radarRefreshTick?: number;
   onSaveWeeklyTemplate?: (tpl: Omit<WeeklyMatchTemplate, 'id' | 'organizerId' | 'createdAt'>) => void;
   onDeleteWeeklyTemplate?: (templateId: string) => void;
   onUseWeeklyTemplate?: (template: WeeklyMatchTemplate) => void;
@@ -129,6 +134,10 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   onOpenHistory,
   onOpenPerformance,
   onOpenAuth,
+  onOpenGoalkeeperRadarSignup,
+  onRefreshRadarMatches,
+  isRefreshingRadar = false,
+  radarRefreshTick = 0,
   onSaveWeeklyTemplate,
   onDeleteWeeklyTemplate,
   onUseWeeklyTemplate,
@@ -152,6 +161,17 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   const [goalkeepers, setGoalkeepers] = useState<Goalkeeper[]>([]);
   const [totalRealInDb, setTotalRealInDb] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [acceptingMatchId, setAcceptingMatchId] = useState<string | null>(null);
+
+  const isLoggedIn = Boolean(user?.id && user.id !== 'usr-guest');
+
+  const handleOpenRadarRegistration = () => {
+    if (isLoggedIn && onOpenGoalkeeperRadarSignup) {
+      onOpenGoalkeeperRadarSignup();
+    } else if (onOpenAuth) {
+      onOpenAuth();
+    }
+  };
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -162,13 +182,46 @@ export const HomeTab: React.FC<HomeTabProps> = ({
     }
   }, [filters]);
 
+  // Partidas abertas no Radar de 30 km para o painel do Goleiro
+  const nearbyOpenRadarMatches = React.useMemo(() => {
+    return matches
+      .filter(
+        (m) =>
+          m.status === 'searching' ||
+          m.operationalStatus === 'awaiting_acceptance' ||
+          m.operationalStatus === 'awaiting_custody_payment'
+      )
+      .map((m) => {
+        const distKm = computeGoalkeeperDistanceKm({
+          profile: { neighborhood: user.neighborhood, city: user.city },
+          targetCity: m.city,
+          targetArena: m.arenaName,
+          targetAddress: m.address,
+        });
+        return { match: m, distKm };
+      })
+      .filter(({ match: m, distKm }) => {
+        if (distKm <= 30) return true;
+        const userCityLower = (user.city || '').toLowerCase();
+        const matchCityLower = (m.city || '').toLowerCase();
+        return Boolean(userCityLower && matchCityLower && matchCityLower.includes(userCityLower.split('-')[0].trim()));
+      })
+      .sort((a, b) => a.distKm - b.distKm);
+  }, [matches, user.neighborhood, user.city]);
+
   const activeMatchesToDisplay = React.useMemo(() => {
     const map = new Map<string, MatchBooking>();
     if (recentBooking) {
-      map.set(recentBooking.id, recentBooking);
+      if (user.role !== 'goleiro' || recentBooking.status !== 'searching') {
+        map.set(recentBooking.id, recentBooking);
+      }
     }
     matches
-      .filter((m) => m.status === 'searching' || m.status === 'confirmed' || m.status === 'in_progress')
+      .filter((m) =>
+        user.role === 'goleiro'
+          ? m.status === 'confirmed' || m.status === 'in_progress'
+          : m.status === 'searching' || m.status === 'confirmed' || m.status === 'in_progress'
+      )
       .forEach((m) => {
         if (!map.has(m.id)) map.set(m.id, m);
       });
@@ -176,7 +229,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
     if (list.length > 0) return list.slice(0, 3);
     const latestCompleted = matches.find((m) => m.status === 'completed');
     return latestCompleted ? [latestCompleted] : [];
-  }, [recentBooking, matches]);
+  }, [recentBooking, matches, user.role]);
 
   const approvedArenas = React.useMemo(
     () => arenas.filter((a) => a.status === 'approved'),
@@ -218,7 +271,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [filters, matches]);
+  }, [filters, matches, radarRefreshTick]);
 
   const handleFilterChange = (newFilters: Partial<SmartFilterCriteria>) => {
     setFilters((prev) => ({ ...prev, ...newFilters }));
@@ -335,6 +388,177 @@ export const HomeTab: React.FC<HomeTabProps> = ({
             </div>
           </div>
         </button>
+      )}
+
+      {/* Seção de Destaque para Goleiros: Partidas e Convocações Próximas no Raio de 30 km */}
+      {user.role === 'goleiro' && (
+        <section className="p-4 sm:p-5 rounded-3xl bg-white dark:bg-slate-900/95 border-2 border-emerald-500/45 shadow-lg shadow-emerald-500/10 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-[#22c55e]/15 border border-[#22c55e]/40 flex items-center justify-center text-emerald-600 dark:text-[#22c55e] shrink-0">
+                <Radar className="w-6 h-6" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="font-display font-extrabold text-sm sm:text-base text-slate-900 dark:text-white">
+                    Partidas e Convocações Próximas no Raio de 30 km
+                  </h2>
+                  <span className="px-2 py-0.5 rounded-lg bg-[#22c55e]/15 border border-[#22c55e]/35 text-[10px] font-mono font-bold text-emerald-700 dark:text-[#22c55e]">
+                    {nearbyOpenRadarMatches.length} {nearbyOpenRadarMatches.length === 1 ? 'vaga aberta' : 'vagas abertas'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Aceite instantaneamente para receber o Pix em custódia pelo contratante.
+                </p>
+              </div>
+            </div>
+
+            {onRefreshRadarMatches && (
+              <button
+                type="button"
+                onClick={() => onRefreshRadarMatches()}
+                disabled={isRefreshingRadar}
+                className="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-800 dark:text-white transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {isRefreshingRadar ? 'Atualizando...' : 'Atualizar Radar'}
+              </button>
+            )}
+          </div>
+
+          {nearbyOpenRadarMatches.length === 0 ? (
+            <div className="p-4 rounded-2xl bg-slate-50 dark:bg-[#020617]/80 border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="text-xs text-slate-600 dark:text-slate-300">
+                Nenhuma partida aberta no raio de 30 km no momento. Mantenha seu perfil ativo no radar para ser notificado assim que um capitão abrir vaga.
+              </div>
+              {isLoggedIn && onOpenGoalkeeperRadarSignup && (
+                <button
+                  type="button"
+                  onClick={handleOpenRadarRegistration}
+                  className="px-4 py-2 rounded-xl bg-[#22c55e] hover:bg-emerald-400 text-slate-950 font-extrabold text-xs shrink-0 cursor-pointer transition-all"
+                >
+                  Configurar Perfil no Radar
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              {nearbyOpenRadarMatches.map(({ match: openMatch, distKm }) => {
+                const alreadyApplied =
+                  Boolean(openMatch.candidates?.some((c) => c.id === user.id)) ||
+                  openMatch.goalkeeperId === user.id;
+                const isPaidConfirmed =
+                  openMatch.paymentStatus === 'paid' && openMatch.goalkeeperId === user.id;
+                const isBusy = acceptingMatchId === openMatch.id;
+                const slotsCount = openMatch.goalkeeperSlotsCount === 2 ? 2 : 1;
+                const totalNet =
+                  openMatch.goalkeeperPayout ??
+                  Math.max(0, openMatch.price - (openMatch.houseFee ?? 5 * slotsCount));
+                const netPerGk = slotsCount === 2 ? Number((totalNet / 2).toFixed(2)) : totalNet;
+
+                return (
+                  <div
+                    key={openMatch.id}
+                    className="p-4 rounded-2xl bg-slate-50 dark:bg-[#020617]/90 border border-slate-200 dark:border-slate-800 hover:border-emerald-500/50 transition-all flex flex-col justify-between gap-3"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="px-2 py-0.5 rounded-md bg-[#38bdf8]/15 border border-[#38bdf8]/35 text-[10px] font-mono font-bold text-sky-700 dark:text-[#38bdf8]">
+                              {openMatch.modality}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/35 text-[10px] font-mono font-bold text-emerald-700 dark:text-[#22c55e]">
+                              {distKm} km
+                            </span>
+                            {openMatch.sosTriggered && (
+                              <span className="px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-[10px] font-bold text-amber-700 dark:text-amber-300">
+                                SOS URGENTE
+                              </span>
+                            )}
+                          </div>
+                          <h3 className="font-display font-extrabold text-sm text-slate-900 dark:text-white mt-1.5 truncate">
+                            {openMatch.arenaName}
+                          </h3>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1 truncate">
+                            <MapPin className="w-3 h-3 text-sky-500 shrink-0" />
+                            <span>{openMatch.address || openMatch.city}</span>
+                          </p>
+                        </div>
+
+                        <div className="text-right shrink-0">
+                          <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                            Cachê Líquido
+                          </span>
+                          <span className="font-mono tabular-nums font-extrabold text-base text-emerald-600 dark:text-[#22c55e]">
+                            {formatCurrency(netPerGk)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-[11px]">
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">Data</span>
+                          <span className="font-semibold text-slate-900 dark:text-white">
+                            {openMatch.date}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">Horário</span>
+                          <span className="font-mono font-semibold text-slate-900 dark:text-white">
+                            {openMatch.time}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">Nível / Vagas</span>
+                          <span className="font-semibold text-slate-900 dark:text-white">
+                            {openMatch.gameLevel || openMatch.competitiveLevel || 'Médio'} · {slotsCount} GK
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="text-[11px] text-slate-600 dark:text-slate-400 flex items-center justify-between gap-2">
+                        <span>Capitão: <strong className="text-slate-800 dark:text-slate-200">{openMatch.organizerName}</strong></span>
+                        <span>{openMatch.durationMinutes || 90} min</span>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+                      {isPaidConfirmed ? (
+                        <div className="w-full py-2.5 px-3 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-center text-xs font-extrabold text-emerald-700 dark:text-[#22c55e]">
+                          ✓ Escalado & Custódia Confirmada
+                        </div>
+                      ) : alreadyApplied ? (
+                        <div className="w-full py-2.5 px-3 rounded-xl bg-sky-500/15 border border-sky-500/40 text-center text-xs font-bold text-sky-700 dark:text-[#38bdf8]">
+                          ✓ Candidatura Enviada · Aguardando Custódia do Capitão
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isBusy || !onAcceptMatchVacancy}
+                          onClick={async () => {
+                            if (!onAcceptMatchVacancy) return;
+                            setAcceptingMatchId(openMatch.id);
+                            try {
+                              await onAcceptMatchVacancy(openMatch);
+                            } finally {
+                              setAcceptingMatchId(null);
+                            }
+                          }}
+                          className="w-full h-11 px-4 rounded-xl bg-[#22c55e] hover:bg-emerald-400 active:scale-[0.98] text-slate-950 font-extrabold text-xs flex items-center justify-center gap-2 shadow-md shadow-emerald-500/20 transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          <GkGloveBallIcon className="w-4 h-4 text-slate-950" />
+                          <span>
+                            {isBusy ? 'Confirmando Aceite...' : 'Aceitar Convocação / Candidatar-se à Vaga'}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
       )}
 
       {/* Active Radar & Confirmed Match Cards */}
@@ -677,6 +901,31 @@ export const HomeTab: React.FC<HomeTabProps> = ({
           )}
         </div>
 
+        {/* Banner direto para goleiro autenticado ainda não catalogado na vitrine (evita loop de login) */}
+        {!isLoading &&
+          user.role === 'goleiro' &&
+          !goalkeepers.some((gk) => gk.id === user.id) &&
+          (isLoggedIn ? onOpenGoalkeeperRadarSignup : onOpenAuth) && (
+            <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                  Seu perfil ainda não está visível no Radar Oficial de Goleiros
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                  Complete seus dados de atleta vinculados à sua conta atual para aparecer na vitrine de 30 km.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleOpenRadarRegistration}
+                className="h-10 px-4 rounded-xl bg-[#22c55e] hover:bg-emerald-400 text-slate-950 font-extrabold text-xs flex items-center gap-2 shrink-0 cursor-pointer active:scale-95 transition-all"
+              >
+                <GkGloveBallIcon className="w-4 h-4 text-slate-950" />
+                <span>Cadastrar-se para Aparecer no Radar</span>
+              </button>
+            </div>
+          )}
+
         {/* Goalkeeper Cards Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {isLoading ? (
@@ -722,10 +971,10 @@ export const HomeTab: React.FC<HomeTabProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
-                  {onOpenAuth && (
+                  {(isLoggedIn ? onOpenGoalkeeperRadarSignup : onOpenAuth) && (
                     <button
                       type="button"
-                      onClick={onOpenAuth}
+                      onClick={handleOpenRadarRegistration}
                       className="h-11 px-5 rounded-xl bg-[#22c55e] hover:bg-emerald-400 text-slate-950 font-extrabold text-xs flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all cursor-pointer active:scale-95"
                     >
                       <GkGloveBallIcon className="w-4 h-4 text-slate-950" />

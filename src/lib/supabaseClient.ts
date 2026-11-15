@@ -3,6 +3,7 @@ import {
   MatchBooking,
   WeeklyMatchTemplate,
   UserProfile,
+  UserRole,
   Transaction,
   WalletDashboardSummary,
   PostMatchAiFeedbackResult,
@@ -1995,26 +1996,73 @@ export async function updateUserPricingProfileInSupabase(params: {
   neighborhood?: string;
   city?: string;
   favoriteGloves?: string;
+  role?: UserRole;
+  availableToday?: boolean;
+  height?: string;
+  dominantFoot?: 'destro' | 'canhoto' | 'ambidestro';
+  categories?: ('society' | 'campo' | 'futsal' | 'areia')[];
+  email?: string;
+  name?: string;
 }): Promise<{ synced: boolean }> {
-  if (!isSupabaseConfigured || !params.userId) {
-    return { synced: false };
+  let clientSynced = false;
+
+  if (isSupabaseConfigured && params.userId && params.userId !== 'usr-guest') {
+    try {
+      const payload: Record<string, any> = {
+        preferred_cache: params.preferredCache,
+        technical_level: params.technicalLevel,
+        nickname: params.nickname,
+        neighborhood: params.neighborhood,
+        city: params.city,
+        favorite_gloves: params.favoriteGloves,
+      };
+      if (params.role) payload.role = params.role;
+      if (typeof params.availableToday === 'boolean') payload.available_today = params.availableToday;
+      if (params.height) payload.height = params.height;
+      if (params.dominantFoot) payload.dominant_foot = params.dominantFoot;
+      if (Array.isArray(params.categories) && params.categories.length > 0) {
+        payload.categories = params.categories;
+      }
+
+      const { error } = await resilientClientProfileUpdate(params.userId, payload);
+      clientSynced = !error;
+    } catch (err) {
+      console.warn('[Supabase updateUserPricingProfileInSupabase warning]', err);
+    }
   }
 
-  try {
-    const { error } = await resilientClientProfileUpdate(params.userId, {
-      preferred_cache: params.preferredCache,
-      technical_level: params.technicalLevel,
-      nickname: params.nickname,
-      neighborhood: params.neighborhood,
-      city: params.city,
-      favorite_gloves: params.favoriteGloves,
-    });
-
-    return { synced: !error };
-  } catch (err) {
-    console.warn('[Supabase updateUserPricingProfileInSupabase warning]', err);
-    return { synced: false };
+  let serverSynced = false;
+  if ((params.role === 'goleiro' || params.availableToday === true) && params.userId && params.userId !== 'usr-guest') {
+    try {
+      const res = await fetch('/api/perfil/ativar-goleiro-radar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: params.userId,
+          email: params.email,
+          name: params.name,
+          nickname: params.nickname,
+          neighborhood: params.neighborhood,
+          city: params.city,
+          favoriteGloves: params.favoriteGloves,
+          preferredCache: params.preferredCache,
+          technicalLevel: params.technicalLevel,
+          height: params.height,
+          dominantFoot: params.dominantFoot,
+          categories: params.categories,
+        }),
+      });
+      const parsed = await safeParseJsonResponse<{ success: boolean; synced?: boolean }>(
+        res,
+        'Ativação de Goleiro no Radar'
+      );
+      serverSynced = Boolean(parsed.valid && parsed.data?.synced);
+    } catch (err) {
+      console.warn('[Ativar Goleiro Radar Endpoint warning]', err);
+    }
   }
+
+  return { synced: clientSynced || serverSynced };
 }
 
 /**
@@ -2458,11 +2506,38 @@ export async function moderateArenaInSupabase(
   }
 }
 
+export async function fetchOpenRadarMatches(): Promise<MatchBooking[]> {
+  try {
+    const res = await fetch('/api/convocacao/partidas-radar');
+    const parsed = await safeParseJsonResponse<{
+      success: boolean;
+      matches?: MatchBooking[];
+    }>(res, 'Listagem de Partidas no Radar');
+    if (parsed.valid && parsed.data?.success && Array.isArray(parsed.data.matches)) {
+      return parsed.data.matches;
+    }
+  } catch (err) {
+    console.warn('[fetchOpenRadarMatches warning]', err);
+  }
+  return [];
+}
+
 /**
- * Busca partidas oficiais do usuário/rede na tabela 'matches' do Supabase.
+ * Busca partidas oficiais do usuário/rede na tabela 'matches' do Supabase
+ * e mescla com partidas abertas no radar (status = 'searching') para visibilidade de goleiros.
  */
 export async function fetchMatchesFromSupabase(userId?: string): Promise<MatchBooking[]> {
-  if (!isSupabaseConfigured) return [];
+  const mergedMap = new Map<string, MatchBooking>();
+
+  const radarMatches = await fetchOpenRadarMatches();
+  radarMatches.forEach((rm) => {
+    if (rm?.id) mergedMap.set(String(rm.id), rm);
+  });
+
+  if (!isSupabaseConfigured) {
+    return Array.from(mergedMap.values());
+  }
+
   try {
     let query = supabase
       .from('matches')
@@ -2471,64 +2546,80 @@ export async function fetchMatchesFromSupabase(userId?: string): Promise<MatchBo
       .limit(40);
 
     if (userId && userId !== 'usr-guest') {
-      query = query.or(`organizer_id.eq.${userId},goalkeeper_id.eq.${userId}`);
+      query = query.or(`organizer_id.eq.${userId},goalkeeper_id.eq.${userId},status.eq.searching`);
+    } else {
+      query = query.eq('status', 'searching');
     }
 
     const { data, error } = await query;
-    if (error || !data) return [];
-
-    return data.map((row: any) => {
-      const price = Number(row.price || 25);
-      const houseFee = Number(row.house_fee ?? ITAPEVA_HOUSE_FEE);
-      const tier = getTierByTotalPrice(price);
-      return {
-        id: String(row.id),
-        organizerId: row.organizer_id || '',
-        organizerName: row.organizer_name || 'Organizador',
-        goalkeeperId: row.goalkeeper_id || undefined,
-        goalkeeperName: row.goalkeeper_name || undefined,
-        goalkeeperPhoto: row.goalkeeper_photo || undefined,
-        arenaName: row.arena_name || 'Arena Itapeva',
-        address: row.address || 'Itapeva - SP',
-        city: row.city || 'Itapeva - SP',
-        date: row.date || 'Recente',
-        time: row.time || '20:00 - 21:00',
-        modality: (row.modality || 'Society') as ModalityType,
-        price,
-        houseFee,
-        goalkeeperPayout: Number(row.goalkeeper_payout ?? Math.max(0, price - houseFee)),
-        pricingTier: row.pricing_tier || tier.tierCode,
-        cashbackEarned: Number(row.cashback_earned ?? Number((price * 0.1).toFixed(2))),
-        status: row.status || 'confirmed',
-        competitiveLevel: row.competitive_level || 'Competitivo',
-        gameLevel: row.game_level || row.competitive_level || 'Médio',
-        durationMinutes: row.duration_minutes ? Number(row.duration_minutes) : 60,
-        goalkeeperSlotsCount: row.goalkeeper_slots_count === 2 ? 2 : 1,
-        selectionMode: row.selection_mode || undefined,
-        operationalStatus: row.operational_status || (row.en_route_20m_confirmed || row.en_route_45m_confirmed ? 'en_route' : row.status === 'searching' ? 'awaiting_acceptance' : 'accepted'),
-        ratingGiven: row.rating_given ? Number(row.rating_given) : undefined,
-        reviewComment: row.review_comment || undefined,
-        reviewTags: Array.isArray(row.review_tags) ? row.review_tags : undefined,
-        mvpGiven: Boolean(row.mvp_given),
-        cleanSheetGiven: Boolean(row.clean_sheet_given),
-        penaltiesSavedGiven: row.penalties_saved_given ? Number(row.penalties_saved_given) : undefined,
-        aiFeedback: row.ai_feedback || undefined,
-        reviewedAt: row.reviewed_at || undefined,
-        notes: row.notes || undefined,
-        paymentStatus: row.payment_status || (row.status === 'searching' ? 'pending' : 'paid'),
-        createdAt: row.created_at || undefined,
-        checkin2hConfirmed: Boolean(row.checkin_2h_confirmed),
-        enRoute45mConfirmed: Boolean(row.en_route_45m_confirmed),
-        enRoute20mNotified: Boolean(row.en_route_20m_notified),
-        enRoute20mConfirmed: Boolean(row.en_route_20m_confirmed || row.en_route_45m_confirmed),
-        enRoute20mAt: row.en_route_20m_at || undefined,
-        goalkeeperCancelled: Boolean(row.goalkeeper_cancelled),
-      };
-    });
+    if (!error && Array.isArray(data)) {
+      data.forEach((row: any) => {
+        const price = Number(row.price || 25);
+        const houseFee = Number(row.house_fee ?? ITAPEVA_HOUSE_FEE);
+        const tier = getTierByTotalPrice(price);
+        const id = String(row.id);
+        const existingMem = mergedMap.get(id);
+        mergedMap.set(id, {
+          id,
+          organizerId: row.organizer_id || existingMem?.organizerId || '',
+          organizerName: row.organizer_name || existingMem?.organizerName || 'Organizador',
+          goalkeeperId: row.goalkeeper_id || existingMem?.goalkeeperId || undefined,
+          goalkeeperName: row.goalkeeper_name || existingMem?.goalkeeperName || undefined,
+          goalkeeperPhoto: row.goalkeeper_photo || existingMem?.goalkeeperPhoto || undefined,
+          arenaName: row.arena_name || existingMem?.arenaName || 'Arena Itapeva',
+          address: row.address || existingMem?.address || 'Itapeva - SP',
+          city: row.city || existingMem?.city || 'Itapeva - SP',
+          date: row.date || existingMem?.date || 'Recente',
+          time: row.time || existingMem?.time || '20:00 - 21:00',
+          modality: (row.modality || existingMem?.modality || 'Society') as ModalityType,
+          price,
+          houseFee,
+          goalkeeperPayout: Number(row.goalkeeper_payout ?? Math.max(0, price - houseFee)),
+          pricingTier: row.pricing_tier || tier.tierCode,
+          cashbackEarned: Number(row.cashback_earned ?? Number((price * 0.1).toFixed(2))),
+          status: row.status || existingMem?.status || 'confirmed',
+          competitiveLevel: row.competitive_level || existingMem?.competitiveLevel || 'Competitivo',
+          gameLevel: row.game_level || row.competitive_level || existingMem?.gameLevel || 'Médio',
+          durationMinutes: row.duration_minutes ? Number(row.duration_minutes) : existingMem?.durationMinutes || 60,
+          goalkeeperSlotsCount: row.goalkeeper_slots_count === 2 ? 2 : existingMem?.goalkeeperSlotsCount || 1,
+          selectionMode: row.selection_mode || existingMem?.selectionMode || undefined,
+          candidates: existingMem?.candidates,
+          slots: existingMem?.slots,
+          operationalStatus:
+            existingMem?.operationalStatus ||
+            row.operational_status ||
+            (row.en_route_20m_confirmed || row.en_route_45m_confirmed
+              ? 'en_route'
+              : row.status === 'searching'
+              ? 'awaiting_acceptance'
+              : 'accepted'),
+          ratingGiven: row.rating_given ? Number(row.rating_given) : undefined,
+          reviewComment: row.review_comment || undefined,
+          reviewTags: Array.isArray(row.review_tags) ? row.review_tags : undefined,
+          mvpGiven: Boolean(row.mvp_given),
+          cleanSheetGiven: Boolean(row.clean_sheet_given),
+          penaltiesSavedGiven: row.penalties_saved_given ? Number(row.penalties_saved_given) : undefined,
+          aiFeedback: row.ai_feedback || undefined,
+          reviewedAt: row.reviewed_at || undefined,
+          notes: row.notes || existingMem?.notes || undefined,
+          paymentStatus: row.payment_status || (row.status === 'searching' ? 'pending' : 'paid'),
+          createdAt: row.created_at || existingMem?.createdAt || undefined,
+          checkin2hConfirmed: Boolean(row.checkin_2h_confirmed),
+          enRoute45mConfirmed: Boolean(row.en_route_45m_confirmed),
+          enRoute20mNotified: Boolean(row.en_route_20m_notified),
+          enRoute20mConfirmed: Boolean(row.en_route_20m_confirmed || row.en_route_45m_confirmed),
+          enRoute20mAt: row.en_route_20m_at || undefined,
+          goalkeeperCancelled: Boolean(row.goalkeeper_cancelled),
+        });
+      });
+    }
   } catch (err) {
     console.warn('[fetchMatchesFromSupabase warning]', err);
-    return [];
   }
+
+  return Array.from(mergedMap.values()).sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
 }
 
 /**
@@ -3479,6 +3570,20 @@ export async function acceptMatchVacancyInSupabase(params: {
         ]);
       }
       synced = !error;
+    }
+
+    const serverRes = await fetch('/api/convocacao/candidatar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        matchId: params.match.id,
+        match: updatedMatch,
+        candidate: nextCandidate,
+      }),
+    }).catch(() => null);
+
+    if (serverRes && serverRes.ok) {
+      synced = true;
     }
   } catch (err) {
     console.warn('[acceptMatchVacancyInSupabase warning]', err);

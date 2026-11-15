@@ -3141,6 +3141,8 @@ app.post('/api/convocacao/notificar-goleiros', async (req: Request, res: Respons
   }
 });
 
+const radarMatchesMemory = new Map<string, Record<string, any>>();
+
 /**
  * 4.5 Rota de API: POST /api/convocacao/publicar-radar
  * Publica a partida gratuitamente no radar de 30 km (status: 'searching', payment_status: 'pending')
@@ -3165,6 +3167,20 @@ app.post('/api/convocacao/publicar-radar', async (req: Request, res: Response) =
     const totalNetCustody = Number(Math.max(0, totalAmount - totalHouseFee).toFixed(2));
     const nowIso = new Date().toISOString();
     const cleanMatchKey = String(match.id || `mtch-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
+
+    radarMatchesMemory.set(cleanMatchKey, {
+      ...match,
+      id: cleanMatchKey,
+      price: totalAmount,
+      houseFee: totalHouseFee,
+      goalkeeperPayout: totalNetCustody,
+      goalkeeperSlotsCount: slotsCount,
+      status: 'searching',
+      paymentStatus: 'pending',
+      operationalStatus: match.operationalStatus || 'awaiting_acceptance',
+      candidates: Array.isArray(match.candidates) ? match.candidates : [],
+      createdAt: match.createdAt || nowIso,
+    });
 
     const supabaseClient = getServerSupabaseAdminClient(false);
     let matchPersisted = false;
@@ -3214,6 +3230,284 @@ app.post('/api/convocacao/publicar-radar', async (req: Request, res: Response) =
     return res.status(500).json({
       success: false,
       error: err?.message || 'Erro ao publicar partida gratuitamente no radar.',
+    });
+  }
+});
+
+/**
+ * 4.6 Rota de API: GET /api/convocacao/partidas-radar
+ * Lista partidas abertas (status = 'searching') para exibição no Radar do Goleiro (30 km).
+ */
+app.get('/api/convocacao/partidas-radar', async (_req: Request, res: Response) => {
+  try {
+    const mergedMap = new Map<string, any>();
+
+    for (const [id, m] of radarMatchesMemory.entries()) {
+      if (m && (m.status === 'searching' || m.paymentStatus !== 'paid')) {
+        mergedMap.set(id, m);
+      }
+    }
+
+    const supabaseClient = getServerSupabaseAdminClient(false);
+    if (supabaseClient) {
+      const { data, error } = await supabaseClient
+        .from('matches')
+        .select('*')
+        .eq('status', 'searching')
+        .order('created_at', { ascending: false })
+        .limit(40);
+
+      if (!error && Array.isArray(data)) {
+        for (const row of data) {
+          const id = String(row.id);
+          const existingMem = mergedMap.get(id);
+          const slotsCount = row.goalkeeper_slots_count === 2 ? 2 : 1;
+          const price = Number(row.price || 25);
+          const houseFee = Number(row.house_fee ?? HOUSE_FEE_BRL * slotsCount);
+
+          mergedMap.set(id, {
+            id,
+            organizerId: row.organizer_id || existingMem?.organizerId || '',
+            organizerName: row.organizer_name || existingMem?.organizerName || 'Contratante',
+            goalkeeperId: row.goalkeeper_id || existingMem?.goalkeeperId || undefined,
+            goalkeeperName: row.goalkeeper_name || existingMem?.goalkeeperName || undefined,
+            arenaName: row.arena_name || existingMem?.arenaName || 'Arena Itapeva',
+            address: row.address || existingMem?.address || 'Itapeva - SP',
+            city: row.city || existingMem?.city || 'Itapeva - SP',
+            date: row.date || existingMem?.date || 'Hoje',
+            time: row.time || existingMem?.time || '20:00 - 21:00',
+            durationMinutes: row.duration_minutes ? Number(row.duration_minutes) : existingMem?.durationMinutes || 90,
+            modality: row.modality || existingMem?.modality || 'Society',
+            competitiveLevel: row.competitive_level || existingMem?.competitiveLevel || 'Médio',
+            gameLevel: row.game_level || row.competitive_level || existingMem?.gameLevel || 'Médio',
+            goalkeeperSlotsCount: slotsCount,
+            price,
+            houseFee,
+            goalkeeperPayout: Number(row.goalkeeper_payout ?? Math.max(0, price - houseFee)),
+            cashbackEarned: Number(row.cashback_earned ?? Number((price * 0.1).toFixed(2))),
+            status: row.status || 'searching',
+            paymentStatus: row.payment_status || 'pending',
+            operationalStatus:
+              existingMem?.operationalStatus ||
+              ((existingMem?.candidates?.length || 0) > 0 ? 'awaiting_custody_payment' : 'awaiting_acceptance'),
+            radiusKm: existingMem?.radiusKm || 30,
+            candidates: existingMem?.candidates || [],
+            slots: existingMem?.slots || undefined,
+            notes: row.notes || existingMem?.notes || '',
+            createdAt: row.created_at || existingMem?.createdAt || new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    const list = Array.from(mergedMap.values()).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+
+    return res.status(200).json({
+      success: true,
+      count: list.length,
+      matches: list,
+    });
+  } catch (err: any) {
+    console.error('[Partidas Radar Error]', err);
+    return res.status(500).json({
+      success: false,
+      matches: [],
+      error: err?.message || 'Erro ao buscar partidas no radar.',
+    });
+  }
+});
+
+/**
+ * 4.7 Rota de API: POST /api/convocacao/candidatar
+ * Registra aceite / candidatura do goleiro em uma partida aberta no radar.
+ */
+app.post('/api/convocacao/candidatar', async (req: Request, res: Response) => {
+  try {
+    const { matchId, match, candidate } = req.body || {};
+    const targetId = String(matchId || match?.id || '').trim();
+    if (!targetId || !candidate?.id) {
+      return res.status(400).json({
+        success: false,
+        error: 'matchId e dados do candidato são obrigatórios.',
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    const existing = radarMatchesMemory.get(targetId) || match || { id: targetId };
+    const existingCandidates = Array.isArray(existing.candidates) ? existing.candidates : [];
+    const normalizedCandidate = {
+      id: String(candidate.id),
+      name: String(candidate.name || 'Goleiro GK'),
+      nickname: candidate.nickname ? String(candidate.nickname) : undefined,
+      photo: candidate.photo ? String(candidate.photo) : undefined,
+      rating: candidate.rating ? Number(candidate.rating) : 5.0,
+      distanceKm: typeof candidate.distanceKm === 'number' ? candidate.distanceKm : undefined,
+      phone: candidate.phone ? String(candidate.phone) : undefined,
+      appliedAt: candidate.appliedAt || nowIso,
+    };
+
+    const updatedCandidates = [
+      normalizedCandidate,
+      ...existingCandidates.filter((c: any) => c.id !== normalizedCandidate.id),
+    ];
+
+    const updatedRecord = {
+      ...existing,
+      id: targetId,
+      goalkeeperId: existing.goalkeeperId || normalizedCandidate.id,
+      goalkeeperName:
+        existing.goalkeeperName && !String(existing.goalkeeperName).includes('Aguardando')
+          ? existing.goalkeeperName
+          : normalizedCandidate.name,
+      operationalStatus:
+        existing.paymentStatus === 'paid' ? 'accepted' : 'awaiting_custody_payment',
+      candidates: updatedCandidates,
+    };
+
+    radarMatchesMemory.set(targetId, updatedRecord);
+
+    const supabaseClient = getServerSupabaseAdminClient(false);
+    let synced = false;
+    if (supabaseClient) {
+      const updatePayload: Record<string, any> = {
+        goalkeeper_name: updatedRecord.goalkeeperName,
+      };
+      if (isValidUuid(normalizedCandidate.id)) {
+        updatePayload.goalkeeper_id = normalizedCandidate.id;
+      }
+      const { error } = await resilientSupabaseUpdate(
+        supabaseClient,
+        'matches',
+        updatePayload,
+        'id',
+        targetId
+      );
+      synced = !error;
+
+      if (isValidUuid(existing.organizerId)) {
+        await resilientSupabaseUpsert(
+          supabaseClient,
+          'notifications',
+          {
+            id: `notif-cand-${Date.now()}`,
+            user_id: existing.organizerId,
+            category: 'match',
+            title: `🧤 ${normalizedCandidate.name} aceitou sua convocação!`,
+            description: `Partida em ${existing.arenaName || 'Arena'} (${existing.date || 'Hoje'} · ${existing.time || ''}). Selecione o goleiro para efetivar a custódia.`,
+            read: false,
+            created_at: nowIso,
+          },
+          'id'
+        );
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      synced,
+      match: updatedRecord,
+    });
+  } catch (err: any) {
+    console.error('[Convocacao Candidatar Error]', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao registrar candidatura do goleiro.',
+    });
+  }
+});
+
+/**
+ * 4.8 Rota de API: POST /api/perfil/ativar-goleiro-radar
+ * Ativa o usuário já logado na base oficial de goleiros (profiles) sem exigir novo login.
+ */
+app.post('/api/perfil/ativar-goleiro-radar', async (req: Request, res: Response) => {
+  try {
+    const {
+      userId,
+      email,
+      name,
+      nickname,
+      neighborhood,
+      city,
+      favoriteGloves,
+      preferredCache,
+      technicalLevel,
+      height,
+      dominantFoot,
+      categories,
+    } = req.body || {};
+
+    if (!userId && !email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Usuário autenticado obrigatório para ativar perfil no radar.',
+      });
+    }
+
+    const supabaseClient = getServerSupabaseAdminClient(false);
+    let synced = false;
+
+    if (supabaseClient) {
+      const lookup = await resolveSupabaseProfileForCredit({
+        supabaseClient,
+        userId,
+        payerEmail: email,
+      });
+
+      const resolvedId = lookup.resolvedUserId || (isValidUuid(userId) ? userId : null);
+      const updatePayload: Record<string, any> = {
+        role: 'goleiro',
+        available_today: true,
+        nickname: nickname || undefined,
+        neighborhood: neighborhood || undefined,
+        city: city || 'Itapeva - SP',
+        favorite_gloves: favoriteGloves || undefined,
+        preferred_cache: preferredCache ? Number(preferredCache) : 25,
+        technical_level: technicalLevel || undefined,
+        height: height || undefined,
+        dominant_foot: dominantFoot || undefined,
+        categories: Array.isArray(categories) && categories.length > 0 ? categories : undefined,
+      };
+
+      if (resolvedId) {
+        const upRes = await resilientSupabaseUpdate(
+          supabaseClient,
+          'profiles',
+          updatePayload,
+          'id',
+          resolvedId
+        );
+        synced = !upRes.error;
+      } else if (isValidUuid(userId)) {
+        const upsertRes = await resilientSupabaseUpsert(
+          supabaseClient,
+          'profiles',
+          {
+            id: userId,
+            email: email || '',
+            name: name || nickname || 'Goleiro GK',
+            ...updatePayload,
+            created_at: new Date().toISOString(),
+          },
+          'id'
+        );
+        synced = !upsertRes.error;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      synced,
+      role: 'goleiro',
+      availableToday: true,
+    });
+  } catch (err: any) {
+    console.error('[Ativar Goleiro Radar Error]', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao ativar perfil de goleiro no radar.',
     });
   }
 });
@@ -3368,6 +3662,8 @@ app.post('/api/convocacao/confirmar-custodia', async (req: Request, res: Respons
         }
       }
     }
+
+    radarMatchesMemory.delete(cleanMatchKey);
 
     return res.status(200).json({
       success: true,
