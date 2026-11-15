@@ -21,7 +21,9 @@ import {
   GkHeartIcon as Heart,
   GkGloveBallIcon,
   GkWhistleIcon,
-  GkCoinPixIcon
+  GkCoinPixIcon,
+  GkFutshopIcon,
+  GkStadiumArenaIcon
 } from './icons';
 import { UserProfile, Goalkeeper, MatchBooking, WeeklyMatchTemplate, ArenaField } from '../types';
 import { formatCurrency } from '../utils/validations';
@@ -189,22 +191,42 @@ export const HomeTab: React.FC<HomeTabProps> = ({
 
   return (
     <div className="space-y-6 pb-24">
-      {/* Hero Visual Card with High-Impact Generated Imagery */}
-      <div className="relative rounded-3xl overflow-hidden border border-slate-800 bg-slate-900 shadow-2xl">
-        <div className="relative h-56 sm:h-64 w-full pointer-events-none select-none">
-          <img
-            src="/src/assets/images/hero_goalkeeper_save_1794330975279.jpg"
-            alt="Goleiro ParedãoGK em ação"
-            className="w-full h-full object-cover object-center"
-            draggable={false}
-            referrerPolicy="no-referrer"
-          />
-          {/* Measured contrast scrim */}
+      {/* Hero Visual Card with Native SVG Vector Artwork */}
+      <div className="relative rounded-3xl overflow-hidden border border-slate-800 bg-[#020617] shadow-2xl">
+        {/* Native SVG Tactical Pitch & Goalkeeper Backdrop */}
+        <div className="absolute inset-0 pointer-events-none select-none overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-br from-[#020617] via-slate-900/95 to-emerald-950/50" />
+          <div className="absolute -top-16 -right-12 w-72 h-72 rounded-full bg-[#22c55e]/10 blur-3xl" />
+          <div className="absolute -bottom-20 left-1/4 w-64 h-64 rounded-full bg-[#38bdf8]/10 blur-3xl" />
+
+          {/* Native SVG Tactical Goal Area & Radar Rings */}
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 600 260"
+            fill="none"
+            className="absolute inset-0 w-full h-full opacity-35"
+            preserveAspectRatio="xMidYMid slice"
+          >
+            <g stroke="#22c55e" strokeOpacity="0.22" strokeWidth="1.2">
+              <rect x="340" y="24" width="236" height="212" rx="14" />
+              <rect x="448" y="68" width="128" height="124" rx="8" />
+              <circle cx="430" cy="130" r="68" strokeDasharray="5 5" />
+              <circle cx="430" cy="130" r="102" stroke="#38bdf8" strokeOpacity="0.18" />
+              <line x1="20" y1="228" x2="580" y2="228" strokeOpacity="0.14" />
+            </g>
+          </svg>
+
+          {/* Large Native SVG Hero Emblem */}
+          <div className="absolute right-4 sm:right-8 top-4 sm:top-1/2 sm:-translate-y-1/2 opacity-20 sm:opacity-30">
+            <GkGloveBallIcon className="w-28 h-28 sm:w-40 sm:h-40 text-[#22c55e]" strokeWidth={1.25} />
+          </div>
+
+          {/* Contrast Scrim */}
           <div className="absolute inset-0 bg-gradient-to-t from-[#020617] via-[#020617]/75 to-transparent" />
         </div>
 
-        {/* Hero Content Overlay */}
-        <div className="absolute inset-0 p-5 sm:p-6 flex flex-col justify-end">
+        {/* Hero Content */}
+        <div className="relative z-10 min-h-[14.5rem] sm:min-h-[16rem] p-5 sm:p-6 flex flex-col justify-end">
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/30 text-[11px] font-bold text-emerald-300 w-fit mb-2 backdrop-blur-md pointer-events-none">
             <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
             <span>Ecossistema Oficial de Goleiros Amadores</span>
@@ -338,21 +360,34 @@ export const HomeTab: React.FC<HomeTabProps> = ({
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Banner 1: Luvas & Equipamento com gerada */}
+          {/* Banner 1: Luvas & Equipamento com ícone SVG nativo */}
           <button
             type="button"
             onClick={onOpenFutshop}
-            className="group relative w-full text-left rounded-2xl overflow-hidden border border-slate-800 bg-slate-900 h-40 cursor-pointer transition-all hover:border-emerald-500/50 active:scale-[0.985] touch-manipulation select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+            className="group relative w-full text-left rounded-2xl overflow-hidden border border-slate-800 bg-[#020617] min-h-[10rem] cursor-pointer transition-all hover:border-emerald-500/50 active:scale-[0.985] touch-manipulation select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
           >
-            <img
-              src="/src/assets/images/elite_gk_gloves_1794330976706.jpg"
-              alt="Luvas de Goleiro Profissionais"
-              className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500 pointer-events-none"
-              draggable={false}
-              referrerPolicy="no-referrer"
-            />
-            <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/60 to-transparent pointer-events-none" />
-            <div className="absolute inset-0 p-4 flex flex-col justify-end pointer-events-none">
+            {/* Native SVG Backdrop */}
+            <div className="absolute inset-0 pointer-events-none select-none overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-br from-[#020617] via-slate-900 to-emerald-950/60" />
+              <div className="absolute -right-8 -top-8 w-40 h-40 rounded-full bg-[#22c55e]/15 blur-2xl" />
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 360 160"
+                fill="none"
+                className="absolute inset-0 w-full h-full opacity-25"
+                preserveAspectRatio="xMidYMid slice"
+              >
+                <path d="M0 130 L360 30" stroke="#22c55e" strokeOpacity="0.25" strokeWidth="1" />
+                <path d="M40 160 L360 72" stroke="#22c55e" strokeOpacity="0.18" strokeWidth="1" />
+                <circle cx="305" cy="54" r="46" stroke="#22c55e" strokeOpacity="0.28" strokeDasharray="4 4" />
+              </svg>
+              <div className="absolute right-4 top-4 w-14 h-14 rounded-2xl bg-[#22c55e]/15 border border-[#22c55e]/30 flex items-center justify-center group-hover:scale-105 transition-transform">
+                <GkFutshopIcon className="w-7 h-7 text-[#22c55e]" strokeWidth={1.6} />
+              </div>
+              <div className="absolute inset-0 bg-gradient-to-t from-[#020617] via-[#020617]/70 to-transparent" />
+            </div>
+
+            <div className="relative z-10 p-4 min-h-[10rem] flex flex-col justify-end pointer-events-none pr-16">
               <div className="text-[10px] font-mono font-bold text-emerald-400 uppercase tracking-wider mb-1">
                 Futshop Parceira
               </div>
@@ -361,26 +396,38 @@ export const HomeTab: React.FC<HomeTabProps> = ({
               </h3>
               <p className="text-[11px] text-slate-300 mt-0.5 flex items-center gap-1">
                 Use o saldo da sua carteira para comprar equipamentos oficiais
-                <ChevronRight className="w-3.5 h-3.5 text-emerald-400" />
+                <ChevronRight className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
               </p>
             </div>
           </button>
 
-          {/* Banner 2: Arenas & Cashback Noturno */}
+          {/* Banner 2: Arenas & Seguro Atleta com ícone SVG nativo */}
           <button
             type="button"
             onClick={onOpenIntelligentCall}
-            className="group relative w-full text-left rounded-2xl overflow-hidden border border-slate-800 bg-slate-900 h-40 cursor-pointer transition-all hover:border-sky-500/50 active:scale-[0.985] touch-manipulation select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            className="group relative w-full text-left rounded-2xl overflow-hidden border border-slate-800 bg-[#020617] min-h-[10rem] cursor-pointer transition-all hover:border-sky-500/50 active:scale-[0.985] touch-manipulation select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
           >
-            <img
-              src="/src/assets/images/arena_soccer_turf_1794330976038.jpg"
-              alt="Arenas Credenciadas"
-              className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500 pointer-events-none"
-              draggable={false}
-              referrerPolicy="no-referrer"
-            />
-            <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/60 to-transparent pointer-events-none" />
-            <div className="absolute inset-0 p-4 flex flex-col justify-end pointer-events-none">
+            {/* Native SVG Backdrop */}
+            <div className="absolute inset-0 pointer-events-none select-none overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-br from-[#020617] via-slate-900 to-sky-950/60" />
+              <div className="absolute -right-8 -top-8 w-40 h-40 rounded-full bg-[#38bdf8]/15 blur-2xl" />
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 360 160"
+                fill="none"
+                className="absolute inset-0 w-full h-full opacity-25"
+                preserveAspectRatio="xMidYMid slice"
+              >
+                <rect x="210" y="18" width="132" height="124" rx="12" stroke="#38bdf8" strokeOpacity="0.22" />
+                <circle cx="276" cy="80" r="34" stroke="#38bdf8" strokeOpacity="0.26" strokeDasharray="4 4" />
+              </svg>
+              <div className="absolute right-4 top-4 w-14 h-14 rounded-2xl bg-[#38bdf8]/15 border border-[#38bdf8]/30 flex items-center justify-center group-hover:scale-105 transition-transform">
+                <GkStadiumArenaIcon className="w-7 h-7 text-[#38bdf8]" strokeWidth={1.6} />
+              </div>
+              <div className="absolute inset-0 bg-gradient-to-t from-[#020617] via-[#020617]/70 to-transparent" />
+            </div>
+
+            <div className="relative z-10 p-4 min-h-[10rem] flex flex-col justify-end pointer-events-none pr-16">
               <div className="text-[10px] font-mono font-bold text-sky-400 uppercase tracking-wider mb-1">
                 Seguro Atleta ArenaDraft
               </div>
@@ -389,7 +436,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
               </h3>
               <p className="text-[11px] text-slate-300 mt-0.5 flex items-center gap-1">
                 Partidas auditadas e cobertura de primeiros socorros
-                <ChevronRight className="w-3.5 h-3.5 text-sky-400" />
+                <ChevronRight className="w-3.5 h-3.5 text-sky-400 shrink-0" />
               </p>
             </div>
           </button>

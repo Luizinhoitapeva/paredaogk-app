@@ -1,15 +1,9 @@
-const CACHE_NAME = 'paredao-gk-v2';
+const CACHE_NAME = 'paredao-gk-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
-  '/icon.svg',
-  '/src/main.tsx',
-  '/src/index.css',
-  '/src/App.tsx',
-  '/src/assets/images/hero_goalkeeper_save_1794330975279.jpg',
-  '/src/assets/images/arena_soccer_turf_1794330976038.jpg',
-  '/src/assets/images/elite_gk_gloves_1794330976706.jpg'
+  '/icon.svg'
 ];
 
 // Instalação: Pré-cache dos ativos estáticos essenciais da aplicação
