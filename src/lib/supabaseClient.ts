@@ -19,6 +19,7 @@ import {
 } from '../types';
 import { evaluateGoalkeeperArenaProximity, normalizeSearchText } from '../utils/arenaProximitySearch';
 import { classifyGoalkeeperTier, getMatchGoalkeeperNetPayout, getTierByTotalPrice, ITAPEVA_HOUSE_FEE } from '../utils/cachePricingAI';
+import { validateCPF } from '../utils/validations';
 import {
   getOfflineAdminWithdrawals,
   saveOfflineAdminWithdrawals,
@@ -1438,16 +1439,31 @@ export interface MercadoPagoPixChargeResponse {
   qrCodeText: string;
   qrCodeBase64: string | null;
   ticketUrl?: string | null;
+  point_of_interaction?: {
+    transaction_data?: {
+      qr_code?: string;
+      qr_code_base64?: string | null;
+      ticket_url?: string | null;
+    };
+  };
+  payer?: {
+    email?: string;
+    first_name?: string;
+    last_name?: string;
+    hasCpf?: boolean;
+  };
   expiresAt: string;
   idempotencyKey?: string;
   publicKeyConfigured?: boolean;
+  accessTokenConfigured?: boolean;
   note?: string;
   error?: string;
 }
 
 /**
  * Chama o backend integrado à API oficial do Mercado Pago (/v1/payments) utilizando
- * VITE_MERCADOPAGO_PUBLIC_KEY e MERCADOPAGO_ACCESS_TOKEN para gerar QR Code base64 e Copia e Cola.
+ * VITE_MERCADOPAGO_PUBLIC_KEY, MERCADOPAGO_ACCESS_TOKEN, X-Idempotency-Key e os dados reais
+ * do usuário autenticado via Supabase Auth para gerar QR Code base64 e Copia e Cola sem truncamentos.
  */
 export async function generateMercadoPagoPixCharge(params: {
   amount: number;
@@ -1468,46 +1484,89 @@ export async function generateMercadoPagoPixCharge(params: {
       ? rawPublicKey
       : '';
 
-  // Recuperar dados reais do usuário logado via Supabase Auth
+  // Recuperar dados reais e token Bearer do usuário logado via Supabase Auth + profiles
   let authUserId = params.userId && params.userId !== 'usr-guest' ? params.userId : undefined;
-  let authEmail = params.customer?.email || '';
-  let authName = params.customer?.name || '';
-  let authPhone = params.customer?.phone || '';
-  let authCpf = params.customer?.cpf || '';
+  let authEmail = (params.customer?.email || '').trim();
+  let authName = (params.customer?.name || '').trim();
+  let authPhone = (params.customer?.phone || '').trim();
+  let authCpf = (params.customer?.cpf || '').trim();
+  let sessionAccessToken = '';
 
   if (isSupabaseConfigured) {
     try {
       const {
         data: { session },
       } = await supabase.auth.getSession();
+      if (session?.access_token) {
+        sessionAccessToken = session.access_token;
+      }
       if (session?.user) {
         authUserId = authUserId || session.user.id;
-        authEmail = authEmail || session.user.email || '';
+        authEmail = authEmail || (session.user.email || '').trim();
         authName =
           authName ||
-          (session.user.user_metadata?.full_name as string) ||
-          (session.user.user_metadata?.name as string) ||
-          '';
-        authPhone = authPhone || (session.user.user_metadata?.phone as string) || '';
-        authCpf = authCpf || (session.user.user_metadata?.cpf as string) || '';
+          String(session.user.user_metadata?.full_name || session.user.user_metadata?.name || '').trim();
+        authPhone = authPhone || String(session.user.user_metadata?.phone || '').trim();
+        authCpf = authCpf || String(session.user.user_metadata?.cpf || '').trim();
+
+        if ((!authCpf || !authName || !authEmail) && authUserId) {
+          const { data: profileRow } = await supabase
+            .from('profiles')
+            .select('name, email, cpf, phone')
+            .eq('id', authUserId)
+            .maybeSingle();
+
+          if (profileRow) {
+            authName = authName || String(profileRow.name || '').trim();
+            authEmail = authEmail || String(profileRow.email || '').trim();
+            authCpf = authCpf || String(profileRow.cpf || '').trim();
+            authPhone = authPhone || String(profileRow.phone || '').trim();
+          }
+        }
       }
     } catch {
-      // Prosseguir com os dados do perfil em sessão se getSession falhar
+      // Prosseguir com os dados disponíveis do usuário em sessão se getSession falhar
     }
   }
 
+  const normalizedEmail = authEmail.toLowerCase();
+  if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    throw new Error(
+      'É necessário estar autenticado com um e-mail válido no seu perfil para gerar a cobrança Pix.'
+    );
+  }
+
+  const cleanCpfDigits = authCpf.replace(/\D/g, '');
+  const validCpf = validateCPF(cleanCpfDigits) ? cleanCpfDigits : '';
+
+  const normalizedName = authName.replace(/\s+/g, ' ').trim() || normalizedEmail.split('@')[0];
+  const nameParts = normalizedName.split(' ');
+  const firstName = nameParts[0] || 'Atleta';
+  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : firstName;
+
+  const idempotencyKey =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `pgk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Idempotency-Key': idempotencyKey,
   };
   if (publicKey) {
     headers['X-MercadoPago-Public-Key'] = publicKey;
   }
+  if (sessionAccessToken) {
+    headers['Authorization'] = `Bearer ${sessionAccessToken}`;
+  }
 
   const resolvedCustomer = {
-    name: authName || 'Atleta ParedãoGK',
-    email: authEmail || 'paredaogkbr@gmail.com',
-    cpf: authCpf || '',
-    phone: authPhone || '',
+    name: normalizedName,
+    first_name: firstName,
+    last_name: lastName,
+    email: normalizedEmail,
+    cpf: validCpf,
+    phone: authPhone.replace(/\D/g, ''),
   };
 
   const controller = new AbortController();
@@ -1523,11 +1582,25 @@ export async function generateMercadoPagoPixCharge(params: {
         amount: params.amount,
         valor: params.amount,
         publicKey: publicKey || undefined,
+        idempotencyKey,
         userId: authUserId,
         type: params.type || 'wallet_deposit',
         matchId: params.matchId,
         description:
-          params.description || `Recarga Carteira Digital ParedãoGK - R$ ${params.amount.toFixed(2)}`,
+          params.description || `Recarga Carteira Digital ParedaoGK - R$ ${params.amount.toFixed(2)}`,
+        payer: {
+          email: normalizedEmail,
+          first_name: firstName,
+          last_name: lastName,
+          ...(validCpf
+            ? {
+                identification: {
+                  type: 'CPF',
+                  number: validCpf,
+                },
+              }
+            : {}),
+        },
         user: {
           id: authUserId,
           ...resolvedCustomer,
@@ -1564,8 +1637,17 @@ export async function generateMercadoPagoPixCharge(params: {
     throw new Error(data?.error || `Falha ao gerar cobrança Pix no Mercado Pago (HTTP ${response.status}).`);
   }
 
-  if (data.qrCodeBase64 && !data.qrCodeBase64.startsWith('data:image')) {
-    data.qrCodeBase64 = `data:image/png;base64,${data.qrCodeBase64}`;
+  const rawQrText =
+    data.point_of_interaction?.transaction_data?.qr_code || data.qrCodeText || '';
+  data.qrCodeText = rawQrText.replace(/[\r\n]+/g, '');
+
+  const rawBase64Candidate =
+    data.qrCodeBase64 || data.point_of_interaction?.transaction_data?.qr_code_base64 || '';
+  if (rawBase64Candidate) {
+    const cleanBase64 = rawBase64Candidate
+      .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/i, '')
+      .replace(/\s+/g, '');
+    data.qrCodeBase64 = cleanBase64 ? `data:image/png;base64,${cleanBase64}` : null;
   }
 
   return data;

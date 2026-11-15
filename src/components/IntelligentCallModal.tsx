@@ -24,7 +24,11 @@ import {
 } from './icons';
 import { ModalityType, MatchBooking, Goalkeeper, UserProfile, WeeklyMatchTemplate, ArenaField } from '../types';
 import { formatCurrency } from '../utils/validations';
-import { broadcastBookingConfirmed, queryGoalkeepersSmart, safeParseJsonResponse } from '../lib/supabaseClient';
+import {
+  broadcastBookingConfirmed,
+  generateMercadoPagoPixCharge,
+  queryGoalkeepersSmart,
+} from '../lib/supabaseClient';
 import { CachePricingAssistant } from './CachePricingAssistant';
 import {
   ITAPEVA_PRICING_TIERS,
@@ -202,58 +206,38 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
     }, waitMs);
   };
 
-  // Disparar geração de cobrança Pix na API Mercado Pago
+  // Disparar geração de cobrança Pix na API Mercado Pago usando os dados reais do usuário autenticado
   const handleGenerateMercadoPagoPix = async () => {
     if (!matchedGk) return;
+
+    if (!user || user.id === 'usr-guest' || !user.email) {
+      setPixError(
+        'Faça login com sua conta antes de gerar o Pix da convocação para validar seus dados de pagador.'
+      );
+      if (onOpenAuth) {
+        onOpenAuth();
+      }
+      return;
+    }
 
     setIsGeneratingPix(true);
     setPixError('');
 
     try {
       const matchId = `mtch-${Date.now()}`;
-      const publicKey = import.meta.env.VITE_MERCADOPAGO_PUBLIC_KEY || '';
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
-      if (publicKey && !publicKey.startsWith('MY_') && !publicKey.includes('placeholder')) {
-        headers['X-MercadoPago-Public-Key'] = publicKey;
-      }
-
-      const response = await fetch('/api/gerar-pix-mercadopago', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          amount: price,
-          valor: price,
-          userId: user?.id && user.id !== 'usr-guest' ? user.id : undefined,
-          type: 'match_booking',
-          description: `Convocação GK ${matchedGk.name} - ${arenaName}`,
-          matchId: matchId,
-          customer: {
-            name: user?.name || 'ParedãoGK Oficial',
-            email: user?.email || 'paredaogkbr@gmail.com',
-            cpf: user?.cpf || '12345678909',
-            phone: user?.phone ? user.phone.replace(/\D/g, '') : '15981596443',
-          },
-        }),
+      const data = await generateMercadoPagoPixCharge({
+        amount: price,
+        userId: user.id,
+        type: 'match_booking',
+        description: `Convocacao GK ${matchedGk.name} - ${arenaName}`,
+        matchId,
+        customer: {
+          name: user.name,
+          email: user.email,
+          cpf: user.cpf,
+          phone: user.phone,
+        },
       });
-
-      const parsed = await safeParseJsonResponse<MercadoPagoPixResponse & { success?: boolean; error?: string }>(
-        response,
-        'API Mercado Pago Pix'
-      );
-
-      if (!parsed.valid || !parsed.data) {
-        throw new Error(
-          parsed.errorMessage ||
-            'A API do Mercado Pago retornou resposta vazia ou inválida ao gerar o Pix.'
-        );
-      }
-
-      const data = parsed.data;
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Falha ao comunicar com a API do Mercado Pago.');
-      }
 
       setMpPixData(data);
       setCountdownSeconds(900);

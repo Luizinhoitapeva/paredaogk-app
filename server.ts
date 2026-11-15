@@ -60,6 +60,46 @@ function getServerSupabaseAdminClient() {
   });
 }
 
+function isValidBrazilianCpf(rawCpf: string): boolean {
+  const cpf = rawCpf.replace(/\D/g, '');
+  if (cpf.length !== 11) return false;
+  if (/^(\d)\1{10}$/.test(cpf)) return false;
+  if (cpf === '12345678909') return false;
+
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    sum += parseInt(cpf.charAt(i), 10) * (10 - i);
+  }
+  let rest = (sum * 10) % 11;
+  const firstDigit = rest === 10 || rest === 11 ? 0 : rest;
+  if (firstDigit !== parseInt(cpf.charAt(9), 10)) return false;
+
+  sum = 0;
+  for (let i = 0; i < 10; i++) {
+    sum += parseInt(cpf.charAt(i), 10) * (11 - i);
+  }
+  rest = (sum * 10) % 11;
+  const secondDigit = rest === 10 || rest === 11 ? 0 : rest;
+  return secondDigit === parseInt(cpf.charAt(10), 10);
+}
+
+function sanitizeEmvAscii(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9 .\-/]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatMercadoPagoExpirationIso(expiresInSeconds: number): string {
+  const clampedSeconds = Math.max(300, Math.min(2592000, Number(expiresInSeconds) || 1800));
+  const brtOffsetMs = -3 * 60 * 60 * 1000;
+  const targetUtc = new Date(Date.now() + clampedSeconds * 1000);
+  const brtShifted = new Date(targetUtc.getTime() + brtOffsetMs);
+  return `${brtShifted.toISOString().slice(0, 23)}-03:00`;
+}
+
 function computeCrc16Ccitt(payload: string): string {
   let crc = 0xffff;
   for (let i = 0; i < payload.length; i++) {
@@ -77,7 +117,7 @@ function computeCrc16Ccitt(payload: string): string {
 }
 
 function tlv(id: string, value: string): string {
-  const len = String(value.length).padStart(2, '0');
+  const len = String(Buffer.byteLength(value, 'utf8')).padStart(2, '0');
   return `${id}${len}${value}`;
 }
 
@@ -88,9 +128,12 @@ function buildEmvPixPayload(params: {
   amount: number;
   txId: string;
 }): string {
-  const merchantAccountInfo = tlv('00', 'br.gov.bcb.pix') + tlv('01', params.pixKey);
+  const merchantAccountInfo = tlv('00', 'br.gov.bcb.pix') + tlv('01', params.pixKey.trim());
   const amountStr = params.amount.toFixed(2);
-  const additionalData = tlv('05', params.txId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 25) || 'PAREDAOGK');
+  const cleanTxId = params.txId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 25) || '***';
+  const additionalData = tlv('05', cleanTxId);
+  const cleanName = sanitizeEmvAscii(params.merchantName).toUpperCase().slice(0, 25) || 'PAREDAOGK';
+  const cleanCity = sanitizeEmvAscii(params.merchantCity).toUpperCase().slice(0, 15) || 'ITAPEVA SP';
 
   const partial =
     tlv('00', '01') +
@@ -99,19 +142,26 @@ function buildEmvPixPayload(params: {
     tlv('53', '986') +
     tlv('54', amountStr) +
     tlv('58', 'BR') +
-    tlv('59', params.merchantName.slice(0, 25)) +
-    tlv('60', params.merchantCity.slice(0, 15)) +
+    tlv('59', cleanName) +
+    tlv('60', cleanCity) +
     tlv('62', additionalData) +
     '6304';
 
   return `${partial}${computeCrc16Ccitt(partial)}`;
 }
 
+function normalizeCleanBase64(existingBase64?: string | null): string | null {
+  if (!existingBase64 || typeof existingBase64 !== 'string') return null;
+  const cleaned = existingBase64
+    .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/i, '')
+    .replace(/\s+/g, '');
+  return cleaned || null;
+}
+
 async function ensureQrCodeDataUrl(qrCodeText: string, existingBase64?: string | null): Promise<string | null> {
-  if (existingBase64 && existingBase64.trim()) {
-    return existingBase64.startsWith('data:image')
-      ? existingBase64
-      : `data:image/png;base64,${existingBase64}`;
+  const cleanBase64 = normalizeCleanBase64(existingBase64);
+  if (cleanBase64) {
+    return `data:image/png;base64,${cleanBase64}`;
   }
   if (!qrCodeText) return null;
   try {
@@ -576,7 +626,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
 /**
  * 1. Rota de API: /api/gerar-pix-mercadopago
  * Gera cobrança Pix dinâmica via API oficial do Mercado Pago (POST https://api.mercadopago.com/v1/payments)
- * utilizando VITE_MERCADOPAGO_PUBLIC_KEY e MERCADOPAGO_ACCESS_TOKEN.
+ * utilizando VITE_MERCADOPAGO_PUBLIC_KEY, MERCADOPAGO_ACCESS_TOKEN e dados reais do pagador autenticado.
  */
 async function handleGerarPixMercadoPago(req: Request, res: Response) {
   try {
@@ -584,12 +634,14 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       amount,
       valor,
       description,
+      payer: bodyPayer,
       customer,
       user: bodyUser,
       matchId,
       userId,
       publicKey: bodyPublicKey,
       mercadoPagoPublicKey,
+      idempotencyKey: bodyIdempotencyKey,
       type = 'wallet_deposit',
       expiresIn = 1800,
     } = req.body || {};
@@ -605,15 +657,117 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
 
     const houseFee = 5;
     const goalkeeperNet = Math.max(0, Number((paymentAmount - houseFee).toFixed(2)));
-    const idempotencyKey = crypto.randomUUID();
+
+    // Header de Idempotência: preservar chave válida recebida ou gerar UUID v4 único por requisição
+    const headerIdempotencyKey = req.headers['x-idempotency-key'];
+    const rawIdempotency =
+      typeof headerIdempotencyKey === 'string' && headerIdempotencyKey.trim()
+        ? headerIdempotencyKey.trim()
+        : typeof bodyIdempotencyKey === 'string' && bodyIdempotencyKey.trim()
+        ? bodyIdempotencyKey.trim()
+        : '';
+    const idempotencyKey =
+      rawIdempotency.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || crypto.randomUUID();
+
     const clientPublicKey =
       (req.headers['x-mercadopago-public-key'] as string | undefined) ||
       (typeof bodyPublicKey === 'string' ? bodyPublicKey : undefined) ||
       (typeof mercadoPagoPublicKey === 'string' ? mercadoPagoPublicKey : undefined);
     const { publicKey, accessToken, isLiveConfigured } = getMercadoPagoCredentials(clientPublicKey);
 
-    const resolvedCustomer = customer || bodyUser || {};
-    const resolvedUserId = userId || bodyUser?.id;
+    // Resolver usuário autenticado via Bearer JWT do Supabase (se disponível)
+    let authSessionUser: {
+      id?: string;
+      email?: string;
+      name?: string;
+      cpf?: string;
+      phone?: string;
+    } = {};
+
+    const authHeader = req.headers.authorization;
+    const bearerToken =
+      typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')
+        ? authHeader.slice(7).trim()
+        : '';
+
+    if (bearerToken) {
+      const supabaseAdmin = getServerSupabaseAdminClient();
+      if (supabaseAdmin) {
+        try {
+          const { data: authData, error: authErr } = await supabaseAdmin.auth.getUser(bearerToken);
+          if (!authErr && authData?.user) {
+            authSessionUser.id = authData.user.id;
+            authSessionUser.email = authData.user.email || undefined;
+            authSessionUser.name =
+              (authData.user.user_metadata?.full_name as string) ||
+              (authData.user.user_metadata?.name as string) ||
+              undefined;
+            authSessionUser.cpf = (authData.user.user_metadata?.cpf as string) || undefined;
+            authSessionUser.phone = (authData.user.user_metadata?.phone as string) || undefined;
+
+            const { data: profileRow } = await supabaseAdmin
+              .from('profiles')
+              .select('name, email, cpf, phone')
+              .eq('id', authData.user.id)
+              .maybeSingle();
+
+            if (profileRow) {
+              authSessionUser.name = profileRow.name || authSessionUser.name;
+              authSessionUser.email = profileRow.email || authSessionUser.email;
+              authSessionUser.cpf = profileRow.cpf || authSessionUser.cpf;
+              authSessionUser.phone = profileRow.phone || authSessionUser.phone;
+            }
+          }
+        } catch (authLookupErr: any) {
+          console.warn('[Mercado Pago Auth Payer Lookup Warning]', authLookupErr?.message);
+        }
+      }
+    }
+
+    const requestCustomer = bodyPayer || customer || bodyUser || {};
+    const resolvedUserId =
+      authSessionUser.id ||
+      (userId && userId !== 'usr-guest' ? String(userId) : undefined) ||
+      (bodyUser?.id && bodyUser.id !== 'usr-guest' ? String(bodyUser.id) : undefined);
+
+    const resolvedEmail = String(
+      authSessionUser.email || requestCustomer?.email || ''
+    )
+      .trim()
+      .toLowerCase();
+
+    if (!resolvedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resolvedEmail)) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'Dados do pagador inválidos: é obrigatório informar um e-mail válido do usuário autenticado para gerar o Pix.',
+      });
+    }
+
+    const rawBodyName =
+      requestCustomer?.first_name && requestCustomer?.last_name
+        ? `${requestCustomer.first_name} ${requestCustomer.last_name}`
+        : requestCustomer?.name;
+    const rawFullName = String(authSessionUser.name || rawBodyName || '').trim();
+    const cleanedFullName = rawFullName.replace(/\s+/g, ' ').trim();
+    const nameParts = cleanedFullName ? cleanedFullName.split(' ') : [];
+    const firstName = (
+      String(requestCustomer?.first_name || nameParts[0] || resolvedEmail.split('@')[0] || 'Atleta').trim()
+    ).slice(0, 60);
+    const lastName = (
+      String(
+        requestCustomer?.last_name ||
+          (nameParts.length > 1 ? nameParts.slice(1).join(' ') : firstName)
+      ).trim()
+    ).slice(0, 60);
+
+    const rawCpf = String(
+      authSessionUser.cpf ||
+        requestCustomer?.identification?.number ||
+        requestCustomer?.cpf ||
+        ''
+    ).replace(/\D/g, '');
+    const validCpf = isValidBrazilianCpf(rawCpf) ? rawCpf : '';
 
     const effectiveWebhookUrl =
       runtimeWebhookConfig.webhookUrl && !runtimeWebhookConfig.webhookUrl.startsWith('/')
@@ -625,47 +779,58 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       !effectiveWebhookUrl.includes('localhost') &&
       !effectiveWebhookUrl.includes('127.0.0.1');
 
-    const resolvedDescription =
+    const resolvedDescription = String(
       description ||
-      (type === 'wallet_deposit'
-        ? `Recarga Carteira Digital ParedãoGK - R$ ${paymentAmount.toFixed(2)}`
-        : `Convocação Goleiro ParedãoGK - Partida #${matchId || Date.now()}`);
+        (type === 'wallet_deposit'
+          ? `Recarga Carteira Digital ParedaoGK - R$ ${paymentAmount.toFixed(2)}`
+          : `Convocacao Goleiro ParedaoGK - Partida #${matchId || Date.now()}`)
+    )
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 250);
 
-    const fullName = String(resolvedCustomer?.name || 'Contratante ParedãoGK').trim();
-    const nameParts = fullName.split(/\s+/);
-    const firstName = nameParts[0] || 'Contratante';
-    const lastName = nameParts.slice(1).join(' ') || 'ParedãoGK';
-    const cleanCpf = String(resolvedCustomer?.cpf || '').replace(/\D/g, '');
-    const expirationDateIso = new Date(Date.now() + Math.max(300, Number(expiresIn) || 1800) * 1000).toISOString();
+    const expirationDateIso = formatMercadoPagoExpirationIso(Number(expiresIn) || 1800);
+    const externalReference = String(
+      matchId ||
+        (resolvedUserId ? `wallet_${resolvedUserId}_${Date.now()}` : `pgk_${Date.now()}`)
+    )
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 64);
+
+    const metadataPayload: Record<string, string> = {
+      platform: 'ParedaoGK',
+      type: String(type === 'match_booking' ? 'match_booking' : 'wallet_deposit'),
+    };
+    if (resolvedUserId) {
+      metadataPayload.user_id = String(resolvedUserId);
+    }
+    if (matchId || type === 'match_booking') {
+      metadataPayload.match_id = String(matchId || `mtch-${Date.now()}`);
+    }
+    if (publicKey) {
+      metadataPayload.public_key_ref = `${publicKey.slice(0, 12)}...`;
+    }
+
+    const payerPayload: Record<string, any> = {
+      email: resolvedEmail,
+      first_name: firstName,
+      last_name: lastName,
+    };
+    if (validCpf) {
+      payerPayload.identification = {
+        type: 'CPF',
+        number: validCpf,
+      };
+    }
 
     const payloadMercadoPago: Record<string, any> = {
       transaction_amount: Number(paymentAmount.toFixed(2)),
-      description: resolvedDescription.slice(0, 250),
+      description: resolvedDescription,
       payment_method_id: 'pix',
       date_of_expiration: expirationDateIso,
-      external_reference:
-        matchId ||
-        (resolvedUserId ? `wallet_${resolvedUserId}_${Date.now()}` : `pgk_${Date.now()}`),
-      payer: {
-        email: resolvedCustomer?.email || 'paredaogkbr@gmail.com',
-        first_name: firstName,
-        last_name: lastName,
-        ...(cleanCpf.length === 11
-          ? {
-              identification: {
-                type: 'CPF',
-                number: cleanCpf,
-              },
-            }
-          : {}),
-      },
-      metadata: {
-        platform: 'ParedaoGK',
-        type,
-        user_id: resolvedUserId || undefined,
-        match_id: matchId || (type === 'match_booking' ? `mtch-${Date.now()}` : undefined),
-        public_key_ref: publicKey ? `${publicKey.slice(0, 10)}...` : undefined,
-      },
+      external_reference: externalReference,
+      payer: payerPayload,
+      metadata: metadataPayload,
     };
 
     if (isPublicHttpsWebhook) {
@@ -674,7 +839,9 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
 
     let mpResponse: any = null;
     let isLiveResponse = false;
+    let liveApiStatus = 0;
     let liveApiErrorMessage = '';
+    let liveApiCauses: any[] | undefined;
 
     if (isLiveConfigured) {
       try {
@@ -690,44 +857,75 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
           signal: AbortSignal.timeout(12000),
         });
 
+        liveApiStatus = response.status;
         const parsedMp = await safeParseExternalJsonResponse(response);
         if (response.ok && parsedMp.valid && parsedMp.data) {
           mpResponse = parsedMp.data;
           isLiveResponse = true;
         } else {
+          liveApiCauses = Array.isArray(parsedMp.data?.cause) ? parsedMp.data.cause : undefined;
           liveApiErrorMessage =
             parsedMp.data?.message ||
             parsedMp.data?.error ||
             parsedMp.reason ||
             `HTTP ${response.status}`;
           console.warn(
-            '[Mercado Pago Live API Warning]',
+            '[Mercado Pago Live API Error]',
             response.status,
             liveApiErrorMessage,
             parsedMp.rawText
           );
         }
       } catch (fetchErr: any) {
+        liveApiStatus = 502;
         liveApiErrorMessage = fetchErr?.message || 'network_error';
-        console.warn('[Mercado Pago Fetch Warning]', liveApiErrorMessage);
+        console.warn('[Mercado Pago Fetch Error]', liveApiErrorMessage);
       }
     }
 
     const nowIso = new Date().toISOString();
 
+    if (isLiveConfigured && !isLiveResponse) {
+      return res.status(liveApiStatus >= 400 && liveApiStatus < 600 ? liveApiStatus : 502).json({
+        success: false,
+        provider: 'mercadopago',
+        error: `Falha ao criar pagamento Pix no Mercado Pago: ${liveApiErrorMessage || 'resposta inválida'}.`,
+        mpStatus: liveApiStatus || 502,
+        mpCauses: liveApiCauses,
+        idempotencyKey,
+        publicKeyConfigured: Boolean(publicKey),
+        accessTokenConfigured: true,
+      });
+    }
+
     if (isLiveResponse && mpResponse) {
       const chargeId = String(mpResponse.id || `mp_${Date.now()}`);
       const txData = mpResponse.point_of_interaction?.transaction_data || {};
-      const qrCodeText = String(txData.qr_code || '');
-      const rawBase64 = txData.qr_code_base64 || null;
-      const ticketUrl = txData.ticket_url || null;
+      // Preservar qr_code verbatim sem truncamento (apenas removendo quebras de linha acidentais)
+      const qrCodeText =
+        typeof txData.qr_code === 'string' ? txData.qr_code.replace(/[\r\n]+/g, '') : '';
+      const cleanRawBase64 = normalizeCleanBase64(txData.qr_code_base64);
+      const ticketUrl = typeof txData.ticket_url === 'string' ? txData.ticket_url : null;
 
-      const qrCodeBase64 = await ensureQrCodeDataUrl(qrCodeText, rawBase64);
+      if (!qrCodeText) {
+        return res.status(502).json({
+          success: false,
+          provider: 'mercadopago',
+          id: chargeId,
+          error:
+            'Mercado Pago aprovou a requisição, mas point_of_interaction.transaction_data.qr_code veio vazio.',
+          idempotencyKey,
+          publicKeyConfigured: Boolean(publicKey),
+          accessTokenConfigured: true,
+        });
+      }
+
+      const qrCodeBase64 = await ensureQrCodeDataUrl(qrCodeText, cleanRawBase64);
       const expiresAt = mpResponse.date_of_expiration || expirationDateIso;
 
       const record: PixChargeRecord = {
         id: chargeId,
-        userId: userId || undefined,
+        userId: resolvedUserId || undefined,
         type: type === 'match_booking' ? 'match_booking' : 'wallet_deposit',
         amount: paymentAmount,
         status: mpResponse.status === 'approved' ? 'completed' : 'pending',
@@ -754,26 +952,45 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
         qrCodeText,
         qrCodeBase64,
         ticketUrl,
+        point_of_interaction: {
+          transaction_data: {
+            qr_code: qrCodeText,
+            qr_code_base64: cleanRawBase64,
+            ticket_url: ticketUrl,
+          },
+        },
+        payer: {
+          email: resolvedEmail,
+          first_name: firstName,
+          last_name: lastName,
+          hasCpf: Boolean(validCpf),
+        },
         expiresAt,
         idempotencyKey,
         publicKeyConfigured: Boolean(publicKey),
+        accessTokenConfigured: true,
       });
     }
 
-    // Fallback seguro: Payload Pix Copia e Cola EMV BR Code válido com CRC16-CCITT + QR Code PNG real para homologação
+    // Modo homologação local (apenas quando MERCADOPAGO_ACCESS_TOKEN não está configurado)
     const chargeId = `mp_pix_${Date.now()}_${idempotencyKey.slice(0, 6)}`;
+    const sandboxPixKey =
+      process.env.MERCADOPAGO_SANDBOX_PIX_KEY ||
+      process.env.PAREDAOGK_PIX_KEY ||
+      '15981596443';
     const pixCode = buildEmvPixPayload({
-      pixKey: 'paredaogkbr@gmail.com',
-      merchantName: 'PAREDAOGK MERCADOPAGO',
+      pixKey: sandboxPixKey,
+      merchantName: 'PAREDAOGK ESPORTES',
       merchantCity: 'ITAPEVA SP',
       amount: paymentAmount,
-      txId: `PGKMP${idempotencyKey.replace(/-/g, '').slice(0, 16)}`,
+      txId: `PGK${idempotencyKey.replace(/-/g, '').slice(0, 18)}`,
     });
     const qrCodeBase64 = await ensureQrCodeDataUrl(pixCode, null);
+    const cleanSandboxRawBase64 = normalizeCleanBase64(qrCodeBase64);
 
     const sandboxRecord: PixChargeRecord = {
       id: chargeId,
-      userId: userId || undefined,
+      userId: resolvedUserId || undefined,
       type: type === 'match_booking' ? 'match_booking' : 'wallet_deposit',
       amount: paymentAmount,
       status: 'pending',
@@ -800,12 +1017,24 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       qrCodeText: pixCode,
       qrCodeBase64,
       ticketUrl: null,
+      point_of_interaction: {
+        transaction_data: {
+          qr_code: pixCode,
+          qr_code_base64: cleanSandboxRawBase64,
+          ticket_url: null,
+        },
+      },
+      payer: {
+        email: resolvedEmail,
+        first_name: firstName,
+        last_name: lastName,
+        hasCpf: Boolean(validCpf),
+      },
       expiresAt: expirationDateIso,
       idempotencyKey,
       publicKeyConfigured: Boolean(publicKey),
-      note: isLiveConfigured
-        ? `API Mercado Pago indisponível (${liveApiErrorMessage}) — QR Code Pix EMV gerado em modo homologação`
-        : 'Pix EMV Mercado Pago gerado em modo homologação (configure VITE_MERCADOPAGO_PUBLIC_KEY e MERCADOPAGO_ACCESS_TOKEN para produção)',
+      accessTokenConfigured: false,
+      note: 'Pix EMV gerado em modo homologação local (configure MERCADOPAGO_ACCESS_TOKEN e VITE_MERCADOPAGO_PUBLIC_KEY para produção).',
     });
   } catch (error: any) {
     console.error('[Mercado Pago Gerar Pix Server Error]', error);
