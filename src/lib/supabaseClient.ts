@@ -378,18 +378,14 @@ export async function submitGoalkeeperReview(review: {
           newMvpCount: calculatedMvp,
         };
 
-        // 3. Atualizar o perfil do jogador no Supabase
-        const { error: updateProfileErr } = await supabase
-          .from('profiles')
-          .update({
-            rating: calculatedRating,
-            matches_played: calculatedMatches,
-            clean_sheets: calculatedCleanSheets,
-            penalties_saved: calculatedPenalties,
-            mvp_count: calculatedMvp,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', review.goalkeeperId);
+        // 3. Atualizar o perfil do jogador no Supabase de forma resiliente
+        const { error: updateProfileErr } = await resilientClientProfileUpdate(review.goalkeeperId, {
+          rating: calculatedRating,
+          matches_played: calculatedMatches,
+          clean_sheets: calculatedCleanSheets,
+          penalties_saved: calculatedPenalties,
+          mvp_count: calculatedMvp,
+        });
 
         if (updateProfileErr) {
           console.warn('[Supabase update profile error]', updateProfileErr.message);
@@ -987,14 +983,10 @@ export async function syncOrganizerRetentionToSupabase(params: {
   }
 
   try {
-    const { error } = await supabase
-      .from('profiles')
-      .update({
-        weekly_templates: params.weeklyTemplates,
-        favorite_goalkeepers: params.favoriteGoalkeeperIds,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', params.organizerId);
+    const { error } = await resilientClientProfileUpdate(params.organizerId, {
+      weekly_templates: params.weeklyTemplates,
+      favorite_goalkeepers: params.favoriteGoalkeeperIds,
+    });
 
     if (error) {
       console.warn('[Supabase syncOrganizerRetention note]', error.message);
@@ -1375,9 +1367,59 @@ export async function fetchWalletDashboardFromSupabase(params: {
   };
 }
 
+function extractClientMissingColumn(error: any): string | null {
+  const msg = String(error?.message || error?.details || error?.hint || '');
+  if (!msg) return null;
+  const pgrstMatch = msg.match(/Could not find the '([^']+)' column of/i);
+  if (pgrstMatch?.[1]) return pgrstMatch[1];
+  const pgMatch = msg.match(/column "?([a-zA-Z0-9_]+)"? (?:of relation "[^"]+" )?does not exist/i);
+  if (pgMatch?.[1]) return pgMatch[1];
+  return null;
+}
+
+async function resilientClientUpsert(
+  table: string,
+  row: Record<string, any>,
+  onConflict = 'id'
+): Promise<{ error: any }> {
+  const payload: Record<string, any> = { ...row };
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const { error } = await supabase.from(table).upsert([payload], { onConflict });
+    if (!error) return { error: null };
+    const missingCol = extractClientMissingColumn(error);
+    if (missingCol && Object.prototype.hasOwnProperty.call(payload, missingCol)) {
+      delete payload[missingCol];
+      continue;
+    }
+    return { error };
+  }
+  return { error: new Error(`Falha ao gravar em ${table}`) };
+}
+
+async function resilientClientProfileUpdate(
+  userId: string,
+  updates: Record<string, any>
+): Promise<{ error: any }> {
+  const payload: Record<string, any> = { ...updates };
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (Object.keys(payload).length === 0) {
+      return { error: new Error('Nenhuma coluna válida para atualizar perfil') };
+    }
+    const { error } = await supabase.from('profiles').update(payload).eq('id', userId);
+    if (!error) return { error: null };
+    const missingCol = extractClientMissingColumn(error);
+    if (missingCol && Object.prototype.hasOwnProperty.call(payload, missingCol)) {
+      delete payload[missingCol];
+      continue;
+    }
+    return { error };
+  }
+  return { error: new Error('Falha ao atualizar saldo do perfil') };
+}
+
 /**
  * Grava uma nova transação (saque Pix Mercado Pago, depósito, cachê ou cashback) na tabela
- * 'wallet_transactions' e atualiza os saldos em 'profiles' no Supabase.
+ * 'wallet_transactions' e atualiza os saldos em 'profiles' no Supabase sem falhar por colunas opcionais.
  */
 export async function recordWalletTransactionInSupabase(params: {
   userId: string;
@@ -1390,36 +1432,30 @@ export async function recordWalletTransactionInSupabase(params: {
   }
 
   try {
-    const { error: txErr } = await supabase.from('wallet_transactions').upsert([
-      {
-        id: params.transaction.id,
-        user_id: params.userId,
-        type: params.transaction.type,
-        amount: params.transaction.amount,
-        description: params.transaction.description,
-        status: params.transaction.status,
-        pix_key: params.transaction.pixKey || null,
-        pix_key_type: params.transaction.pixKeyType || null,
-        receipt_code: params.transaction.receiptCode,
-        provider: params.transaction.provider || 'mercadopago',
-        match_id: params.transaction.matchId || null,
-        arena_name: params.transaction.arenaName || null,
-        created_at: new Date().toISOString(),
-      },
-    ]);
+    const { error: txErr } = await resilientClientUpsert('wallet_transactions', {
+      id: params.transaction.id,
+      user_id: params.userId,
+      type: params.transaction.type,
+      amount: params.transaction.amount,
+      description: params.transaction.description,
+      status: params.transaction.status,
+      pix_key: params.transaction.pixKey || null,
+      pix_key_type: params.transaction.pixKeyType || null,
+      receipt_code: params.transaction.receiptCode,
+      provider: params.transaction.provider || 'mercadopago',
+      match_id: params.transaction.matchId || null,
+      arena_name: params.transaction.arenaName || null,
+      created_at: new Date().toISOString(),
+    });
 
     const profileUpdate: Record<string, any> = {
       wallet_balance: params.newWalletBalance,
-      updated_at: new Date().toISOString(),
     };
     if (typeof params.newCashbackBalance === 'number') {
       profileUpdate.cashback_balance = params.newCashbackBalance;
     }
 
-    const { error: profErr } = await supabase
-      .from('profiles')
-      .update(profileUpdate)
-      .eq('id', params.userId);
+    const { error: profErr } = await resilientClientProfileUpdate(params.userId, profileUpdate);
 
     return { synced: !txErr && !profErr };
   } catch (err) {
@@ -1468,6 +1504,9 @@ export interface MercadoPagoPixChargeResponse {
 export async function generateMercadoPagoPixCharge(params: {
   amount: number;
   userId?: string;
+  goalkeeperId?: string;
+  goalkeeperName?: string;
+  arenaName?: string;
   description?: string;
   matchId?: string;
   type?: 'wallet_deposit' | 'match_booking';
@@ -1584,6 +1623,9 @@ export async function generateMercadoPagoPixCharge(params: {
         publicKey: publicKey || undefined,
         idempotencyKey,
         userId: authUserId,
+        goalkeeperId: params.goalkeeperId,
+        goalkeeperName: params.goalkeeperName,
+        arenaName: params.arenaName,
         type: params.type || 'wallet_deposit',
         matchId: params.matchId,
         description:
@@ -1781,7 +1823,7 @@ export async function creditWalletDepositInSupabase(params: {
   }
 
   try {
-    // 1. Verificar idempotência (caso o webhook server-side já tenha creditado)
+    // 1. Verificar idempotência e ler perfil completo (detectando coluna real de saldo)
     const [{ data: existingTx }, { data: profileRow, error: profileReadErr }] = await Promise.all([
       supabase
         .from('wallet_transactions')
@@ -1790,7 +1832,7 @@ export async function creditWalletDepositInSupabase(params: {
         .maybeSingle(),
       supabase
         .from('profiles')
-        .select('wallet_balance')
+        .select('*')
         .eq('id', params.userId)
         .maybeSingle(),
     ]);
@@ -1799,8 +1841,17 @@ export async function creditWalletDepositInSupabase(params: {
       throw new Error(profileReadErr.message);
     }
 
+    const balanceCol =
+      profileRow && Object.prototype.hasOwnProperty.call(profileRow, 'wallet_balance')
+        ? 'wallet_balance'
+        : profileRow && Object.prototype.hasOwnProperty.call(profileRow, 'balance')
+        ? 'balance'
+        : profileRow && Object.prototype.hasOwnProperty.call(profileRow, 'saldo')
+        ? 'saldo'
+        : 'wallet_balance';
+
     const currentDbBalance = Number(
-      profileRow?.wallet_balance ?? params.fallbackCurrentBalance ?? 0
+      profileRow?.[balanceCol] ?? params.fallbackCurrentBalance ?? 0
     );
 
     if (existingTx && existingTx.status === 'completed') {
@@ -1815,31 +1866,28 @@ export async function creditWalletDepositInSupabase(params: {
     const updatedBalance = Number((currentDbBalance + params.amount).toFixed(2));
     const nowIso = new Date().toISOString();
 
-    const { error: txErr } = await supabase.from('wallet_transactions').upsert([
-      {
-        id: txId,
-        user_id: params.userId,
-        type: 'pix_in',
-        amount: params.amount,
-        description: transaction.description,
-        status: 'completed',
-        receipt_code: params.receiptCode,
-        provider: 'mercadopago',
-        created_at: nowIso,
-      },
-    ]);
+    const { error: txErr } = await resilientClientUpsert('wallet_transactions', {
+      id: txId,
+      user_id: params.userId,
+      type: 'pix_in',
+      amount: params.amount,
+      gross_amount: params.amount,
+      house_fee: 0,
+      net_amount: params.amount,
+      description: transaction.description,
+      status: 'completed',
+      receipt_code: params.receiptCode,
+      provider: 'mercadopago',
+      created_at: nowIso,
+    });
 
     if (txErr) {
       throw new Error(txErr.message);
     }
 
-    const { error: profErr } = await supabase
-      .from('profiles')
-      .update({
-        wallet_balance: updatedBalance,
-        updated_at: nowIso,
-      })
-      .eq('id', params.userId);
+    const { error: profErr } = await resilientClientProfileUpdate(params.userId, {
+      [balanceCol]: updatedBalance,
+    });
 
     if (profErr) {
       throw new Error(profErr.message);
@@ -1909,18 +1957,14 @@ export async function updateUserPricingProfileInSupabase(params: {
   }
 
   try {
-    const { error } = await supabase
-      .from('profiles')
-      .update({
-        preferred_cache: params.preferredCache,
-        technical_level: params.technicalLevel,
-        nickname: params.nickname,
-        neighborhood: params.neighborhood,
-        city: params.city,
-        favorite_gloves: params.favoriteGloves,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', params.userId);
+    const { error } = await resilientClientProfileUpdate(params.userId, {
+      preferred_cache: params.preferredCache,
+      technical_level: params.technicalLevel,
+      nickname: params.nickname,
+      neighborhood: params.neighborhood,
+      city: params.city,
+      favorite_gloves: params.favoriteGloves,
+    });
 
     return { synced: !error };
   } catch (err) {
@@ -2677,21 +2721,24 @@ export async function processAdminPixWithdrawalInSupabase(params: {
       if (params.action === 'reject' && params.withdrawal.userId) {
         const { data: prof } = await supabase
           .from('profiles')
-          .select('wallet_balance')
+          .select('*')
           .eq('id', params.withdrawal.userId)
           .maybeSingle();
 
         if (prof) {
+          const balanceCol = Object.prototype.hasOwnProperty.call(prof, 'wallet_balance')
+            ? 'wallet_balance'
+            : Object.prototype.hasOwnProperty.call(prof, 'balance')
+            ? 'balance'
+            : Object.prototype.hasOwnProperty.call(prof, 'saldo')
+            ? 'saldo'
+            : 'wallet_balance';
           const refundedBalance = Number(
-            (Number(prof.wallet_balance || 0) + params.withdrawal.requestedAmount).toFixed(2)
+            (Number(prof[balanceCol] || 0) + params.withdrawal.requestedAmount).toFixed(2)
           );
-          await supabase
-            .from('profiles')
-            .update({
-              wallet_balance: refundedBalance,
-              updated_at: nowIso,
-            })
-            .eq('id', params.withdrawal.userId);
+          await resilientClientProfileUpdate(params.withdrawal.userId, {
+            [balanceCol]: refundedBalance,
+          });
         }
       }
 

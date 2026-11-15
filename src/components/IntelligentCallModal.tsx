@@ -228,6 +228,9 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
       const data = await generateMercadoPagoPixCharge({
         amount: price,
         userId: user.id,
+        goalkeeperId: matchedGk.id,
+        goalkeeperName: matchedGk.name,
+        arenaName,
         type: 'match_booking',
         description: `Convocacao GK ${matchedGk.name} - ${arenaName}`,
         matchId,

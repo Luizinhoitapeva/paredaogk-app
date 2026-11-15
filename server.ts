@@ -64,15 +64,128 @@ function getMercadoPagoCredentials(clientPublicKey?: string) {
   };
 }
 
-function getServerSupabaseAdminClient() {
-  const url = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  if (isPlaceholderSecret(url) || isPlaceholderSecret(serviceRoleKey)) {
+function getServerSupabaseAdminClient(preferServiceRoleOnly = false) {
+  const url = cleanEnvSecret(
+    process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
+  );
+  const serviceRoleKey = cleanEnvSecret(
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.SUPABASE_SERVICE_KEY ||
+      process.env.SUPABASE_SECRET_KEY ||
+      ''
+  );
+  const anonKey = cleanEnvSecret(
+    process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || ''
+  );
+
+  const selectedKey = !isPlaceholderSecret(serviceRoleKey)
+    ? serviceRoleKey
+    : !preferServiceRoleOnly && !isPlaceholderSecret(anonKey)
+    ? anonKey
+    : '';
+
+  if (isPlaceholderSecret(url) || isPlaceholderSecret(selectedKey)) {
     return null;
   }
-  return createClient(url.trim(), serviceRoleKey.trim(), {
+
+  return createClient(url, selectedKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+}
+
+function extractMissingColumnFromSupabaseError(error: any): string | null {
+  const msg = String(error?.message || error?.details || error?.hint || '');
+  if (!msg) return null;
+  const pgrstMatch = msg.match(/Could not find the '([^']+)' column of/i);
+  if (pgrstMatch?.[1]) return pgrstMatch[1];
+  const pgMatch = msg.match(/column "?([a-zA-Z0-9_]+)"? (?:of relation "[^"]+" )?does not exist/i);
+  if (pgMatch?.[1]) return pgMatch[1];
+  return null;
+}
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isValidUuid(val?: string | null): boolean {
+  return Boolean(val && UUID_REGEX.test(val.trim()));
+}
+
+async function resilientSupabaseUpsert(
+  supabaseClient: any,
+  table: string,
+  row: Record<string, any>,
+  onConflict = 'id'
+): Promise<{ error: any; data?: any; skippedColumns: string[] }> {
+  const payload: Record<string, any> = { ...row };
+  const skippedColumns: string[] = [];
+
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const { data, error } = await supabaseClient
+      .from(table)
+      .upsert([payload], { onConflict })
+      .select('*')
+      .maybeSingle();
+
+    if (!error) {
+      return { error: null, data, skippedColumns };
+    }
+
+    const missingCol = extractMissingColumnFromSupabaseError(error);
+    if (missingCol && Object.prototype.hasOwnProperty.call(payload, missingCol)) {
+      skippedColumns.push(missingCol);
+      delete payload[missingCol];
+      continue;
+    }
+
+    if (/invalid input syntax for type uuid/i.test(String(error?.message || ''))) {
+      if (payload.match_id && !isValidUuid(String(payload.match_id))) {
+        skippedColumns.push('match_id');
+        payload.match_id = null;
+        continue;
+      }
+    }
+
+    return { error, data, skippedColumns };
+  }
+
+  return { error: new Error(`Max retries reached upserting ${table}`), skippedColumns };
+}
+
+async function resilientSupabaseUpdate(
+  supabaseClient: any,
+  table: string,
+  updates: Record<string, any>,
+  matchColumn: string,
+  matchValue: string
+): Promise<{ error: any; data?: any; skippedColumns: string[] }> {
+  const payload: Record<string, any> = { ...updates };
+  const skippedColumns: string[] = [];
+
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (Object.keys(payload).length === 0) {
+      return { error: new Error(`Nenhuma coluna válida restante para atualizar ${table}`), skippedColumns };
+    }
+
+    const { data, error } = await supabaseClient
+      .from(table)
+      .update(payload)
+      .eq(matchColumn, matchValue)
+      .select('*')
+      .maybeSingle();
+
+    if (!error) {
+      return { error: null, data, skippedColumns };
+    }
+
+    const missingCol = extractMissingColumnFromSupabaseError(error);
+    if (missingCol && Object.prototype.hasOwnProperty.call(payload, missingCol)) {
+      skippedColumns.push(missingCol);
+      delete payload[missingCol];
+      continue;
+    }
+
+    return { error, data, skippedColumns };
+  }
+
+  return { error: new Error(`Max retries reached updating ${table}`), skippedColumns };
 }
 
 function isValidBrazilianCpf(rawCpf: string): boolean {
@@ -389,94 +502,401 @@ function verifyMercadoPagoHmac(
   return { valid: false, expected: expectedPrimary };
 }
 
+const HOUSE_FEE_BRL = 5;
+
+function detectProfileBalanceColumns(profile: Record<string, any> | null | undefined) {
+  const row = profile || {};
+  const availableCandidates = ['wallet_balance', 'balance', 'saldo', 'available_balance'];
+  const custodyCandidates = ['pending_balance', 'custody_balance', 'saldo_custodia', 'escrow_balance'];
+
+  const availableCol =
+    availableCandidates.find((col) => Object.prototype.hasOwnProperty.call(row, col)) ||
+    'wallet_balance';
+  const custodyCol =
+    custodyCandidates.find((col) => Object.prototype.hasOwnProperty.call(row, col)) ||
+    'pending_balance';
+  const hasUpdatedAt = Object.prototype.hasOwnProperty.call(row, 'updated_at');
+
+  return { availableCol, custodyCol, hasUpdatedAt };
+}
+
+async function resolveSupabaseProfileForCredit(params: {
+  supabaseClient: any;
+  userId?: string;
+  payerEmail?: string;
+  profileName?: string;
+}): Promise<{ profile: Record<string, any> | null; resolvedUserId: string; error?: string }> {
+  const { supabaseClient, userId, payerEmail, profileName } = params;
+  const cleanUserId = userId && userId !== 'usr-guest' ? userId.trim() : '';
+  const cleanEmail = payerEmail ? payerEmail.trim().toLowerCase() : '';
+  const cleanName = profileName ? profileName.trim() : '';
+
+  if (cleanUserId && isValidUuid(cleanUserId)) {
+    const { data, error } = await supabaseClient
+      .from('profiles')
+      .select('*')
+      .eq('id', cleanUserId)
+      .maybeSingle();
+
+    if (!error && data) {
+      return { profile: data, resolvedUserId: String(data.id || cleanUserId) };
+    }
+    if (error) {
+      console.warn('[Supabase Profile Fetch by ID Warning]', error.message);
+    }
+  }
+
+  if (cleanEmail) {
+    const { data: byEmail, error: emailErr } = await supabaseClient
+      .from('profiles')
+      .select('*')
+      .ilike('email', cleanEmail)
+      .maybeSingle();
+
+    if (!emailErr && byEmail) {
+      return { profile: byEmail, resolvedUserId: String(byEmail.id) };
+    }
+  }
+
+  if (cleanName) {
+    const { data: byName, error: nameErr } = await supabaseClient
+      .from('profiles')
+      .select('*')
+      .ilike('name', cleanName)
+      .limit(1)
+      .maybeSingle();
+
+    if (!nameErr && byName) {
+      return { profile: byName, resolvedUserId: String(byName.id) };
+    }
+  }
+
+  // Se houver UUID válido do Supabase Auth sem linha em profiles ainda, criar perfil base
+  if (cleanUserId && isValidUuid(cleanUserId)) {
+    let fallbackName = cleanEmail ? cleanEmail.split('@')[0] : 'Atleta ParedaoGK';
+    let resolvedAuthEmail = cleanEmail;
+
+    try {
+      const { data: authData } = await supabaseClient.auth.admin.getUserById(cleanUserId);
+      if (authData?.user) {
+        resolvedAuthEmail = authData.user.email || resolvedAuthEmail;
+        fallbackName =
+          (authData.user.user_metadata?.full_name as string) ||
+          (authData.user.user_metadata?.name as string) ||
+          fallbackName;
+      }
+    } catch {
+      // Ignorar quando a chave não possuir escopo auth.admin
+    }
+
+    const baseProfile: Record<string, any> = {
+      id: cleanUserId,
+      name: fallbackName,
+      email: resolvedAuthEmail || `${cleanUserId}@paredaogk.local`,
+      role: 'contratante',
+      wallet_balance: 0,
+      pending_balance: 0,
+      cashback_balance: 0,
+      created_at: new Date().toISOString(),
+    };
+
+    const upsertRes = await resilientSupabaseUpsert(supabaseClient, 'profiles', baseProfile, 'id');
+    if (!upsertRes.error) {
+      return {
+        profile: upsertRes.data || baseProfile,
+        resolvedUserId: cleanUserId,
+      };
+    }
+
+    return {
+      profile: null,
+      resolvedUserId: cleanUserId,
+      error: upsertRes.error?.message || 'profile_creation_failed',
+    };
+  }
+
+  return { profile: null, resolvedUserId: '', error: 'profile_not_found' };
+}
+
 async function creditSupabaseWalletFromWebhook(params: {
   paymentId: string;
   userId?: string;
-  amountBrl: number;
+  goalkeeperId?: string;
+  goalkeeperName?: string;
+  payerEmail?: string;
+  paymentType: 'wallet_deposit' | 'match_booking';
+  event: string;
+  grossAmountBrl: number;
+  houseFeeBrl: number;
+  netAmountBrl: number;
   receiptCode: string;
+  matchId?: string;
+  arenaName?: string;
   description?: string;
-}): Promise<{ credited: boolean; newBalance?: number; alreadyProcessed?: boolean; reason?: string }> {
-  const { paymentId, userId, amountBrl, receiptCode, description } = params;
-  if (!userId || userId === 'usr-guest' || !amountBrl || amountBrl <= 0) {
-    return { credited: false, reason: 'userId_or_amount_missing' };
+}): Promise<{
+  credited: boolean;
+  newBalance?: number;
+  newCustodyBalance?: number;
+  creditedColumn?: string;
+  resolvedTargetUserId?: string;
+  alreadyProcessed?: boolean;
+  reason?: string;
+}> {
+  const {
+    paymentId,
+    userId,
+    goalkeeperId,
+    goalkeeperName,
+    payerEmail,
+    paymentType,
+    event,
+    grossAmountBrl,
+    houseFeeBrl,
+    netAmountBrl,
+    receiptCode,
+    matchId,
+    arenaName,
+    description,
+  } = params;
+
+  if (!grossAmountBrl || grossAmountBrl <= 0) {
+    return { credited: false, reason: 'amount_missing_or_invalid' };
   }
 
-  const supabaseAdmin = getServerSupabaseAdminClient();
-  if (!supabaseAdmin) {
-    return { credited: false, reason: 'supabase_service_role_not_configured' };
+  const supabaseClient = getServerSupabaseAdminClient(false);
+  if (!supabaseClient) {
+    return { credited: false, reason: 'supabase_credentials_not_configured' };
   }
 
   try {
-    const txId = `tx-mp-${paymentId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
-    const { data: existingTx } = await supabaseAdmin
+    const cleanPaymentKey = paymentId.replace(/[^a-zA-Z0-9_-]/g, '');
+    const txId =
+      event === 'custody.released' ? `tx-mp-rel-${cleanPaymentKey}` : `tx-mp-${cleanPaymentKey}`;
+    const feeTxId = `tx-mp-fee-${cleanPaymentKey}`;
+
+    const { data: existingTx } = await supabaseClient
       .from('wallet_transactions')
       .select('id, status')
       .eq('id', txId)
       .maybeSingle();
 
-    if (existingTx && existingTx.status === 'completed') {
-      return { credited: true, alreadyProcessed: true };
+    const isBookingFlow = paymentType === 'match_booking' || event === 'custody.released';
+
+    // Para contratação de goleiro, tentar primeiro o perfil do goleiro; se for ID local/catálogo (não-UUID),
+    // usar o perfil autenticado do contratante para registrar custódia e separar Taxa da Casa sem falhar.
+    let profileLookup: { profile: Record<string, any> | null; resolvedUserId: string; error?: string } = {
+      profile: null,
+      resolvedUserId: '',
+    };
+
+    if (isBookingFlow && (goalkeeperId || goalkeeperName)) {
+      profileLookup = await resolveSupabaseProfileForCredit({
+        supabaseClient,
+        userId: goalkeeperId,
+        profileName: goalkeeperName,
+      });
     }
 
-    const { data: profile, error: profFetchErr } = await supabaseAdmin
-      .from('profiles')
-      .select('wallet_balance')
-      .eq('id', userId)
-      .maybeSingle();
-
-    if (profFetchErr || !profile) {
-      return { credited: false, reason: profFetchErr?.message || 'profile_not_found' };
+    if (!profileLookup.profile || !profileLookup.resolvedUserId) {
+      profileLookup = await resolveSupabaseProfileForCredit({
+        supabaseClient,
+        userId,
+        payerEmail,
+      });
     }
 
-    const currentBalance = Number(profile.wallet_balance || 0);
-    const newBalance = Number((currentBalance + amountBrl).toFixed(2));
+    if (!profileLookup.profile || !profileLookup.resolvedUserId) {
+      return {
+        credited: false,
+        reason: profileLookup.error || 'userId_or_profile_not_found',
+      };
+    }
+
+    const profile = profileLookup.profile;
+    const targetUserId = profileLookup.resolvedUserId;
+    const { availableCol, custodyCol, hasUpdatedAt } = detectProfileBalanceColumns(profile);
+
+    const currentAvailable = Number(profile[availableCol] ?? 0);
+    const currentCustody = Number(profile[custodyCol] ?? 0);
+
+    if (existingTx && (existingTx.status === 'completed' || existingTx.status === 'pending')) {
+      return {
+        credited: true,
+        alreadyProcessed: true,
+        newBalance: Number(currentAvailable.toFixed(2)),
+        newCustodyBalance: Number(currentCustody.toFixed(2)),
+        creditedColumn:
+          paymentType === 'match_booking' && event !== 'custody.released' ? custodyCol : availableCol,
+        resolvedTargetUserId: targetUserId,
+      };
+    }
+
     const nowIso = new Date().toISOString();
+    const isCustodyCredit = paymentType === 'match_booking' && event !== 'custody.released';
+    const isCustodyRelease = event === 'custody.released';
 
-    const { error: txErr } = await supabaseAdmin.from('wallet_transactions').upsert([
-      {
-        id: txId,
-        user_id: userId,
-        type: 'pix_in',
-        amount: amountBrl,
-        description: description || 'Recarga Pix Mercado Pago Confirmada (Webhook)',
+    // Valor líquido creditado após dedução da taxa da casa
+    const creditValue = Number((netAmountBrl > 0 ? netAmountBrl : grossAmountBrl).toFixed(2));
+
+    let nextAvailable = currentAvailable;
+    let nextCustody = currentCustody;
+    let creditedColumn = availableCol;
+
+    const profileUpdatePayload: Record<string, any> = {};
+
+    if (isCustodyRelease) {
+      nextCustody = Number(Math.max(0, currentCustody - creditValue).toFixed(2));
+      nextAvailable = Number((currentAvailable + creditValue).toFixed(2));
+      profileUpdatePayload[availableCol] = nextAvailable;
+      if (Object.prototype.hasOwnProperty.call(profile, custodyCol)) {
+        profileUpdatePayload[custodyCol] = nextCustody;
+      }
+      creditedColumn = availableCol;
+    } else if (isCustodyCredit && Object.prototype.hasOwnProperty.call(profile, custodyCol)) {
+      nextCustody = Number((currentCustody + creditValue).toFixed(2));
+      profileUpdatePayload[custodyCol] = nextCustody;
+      creditedColumn = custodyCol;
+    } else {
+      nextAvailable = Number((currentAvailable + creditValue).toFixed(2));
+      profileUpdatePayload[availableCol] = nextAvailable;
+      creditedColumn = availableCol;
+    }
+
+    if (hasUpdatedAt) {
+      profileUpdatePayload.updated_at = nowIso;
+    }
+
+    // 1. Gravar transação líquida principal (com colunas opcionais resilientes)
+    const txDescription =
+      houseFeeBrl > 0
+        ? `${description || (isCustodyCredit ? 'Cachê em Custódia ParedãoGK' : 'Recarga Pix Mercado Pago')} · Bruto R$ ${grossAmountBrl.toFixed(2)} | Taxa Casa R$ ${houseFeeBrl.toFixed(2)} | Líquido R$ ${creditValue.toFixed(2)}`
+        : description || 'Recarga Pix Mercado Pago Confirmada (Webhook)';
+
+    const mainTxRow: Record<string, any> = {
+      id: txId,
+      user_id: targetUserId,
+      type: isCustodyCredit || isCustodyRelease ? 'match_cache' : 'pix_in',
+      amount: creditValue,
+      gross_amount: grossAmountBrl,
+      house_fee: houseFeeBrl,
+      net_amount: creditValue,
+      description: txDescription,
+      status: isCustodyCredit ? 'pending' : 'completed',
+      receipt_code: receiptCode,
+      provider: 'mercadopago',
+      match_id: matchId || null,
+      arena_name: arenaName || null,
+      created_at: nowIso,
+    };
+
+    const mainTxRes = await resilientSupabaseUpsert(
+      supabaseClient,
+      'wallet_transactions',
+      mainTxRow,
+      'id'
+    );
+
+    if (mainTxRes.error) {
+      return { credited: false, reason: `wallet_transactions_error: ${mainTxRes.error.message}` };
+    }
+
+    // 2. Se houver Taxa da Casa (R$ 5,00), registrar lançamento separado da Taxa da Casa para auditoria contábil
+    if (houseFeeBrl > 0 && !isCustodyRelease) {
+      const feeOwnerId = isValidUuid(userId) ? String(userId).trim() : targetUserId;
+      const feeTxRow: Record<string, any> = {
+        id: feeTxId,
+        user_id: feeOwnerId,
+        type: 'house_fee',
+        amount: -Number(houseFeeBrl.toFixed(2)),
+        gross_amount: grossAmountBrl,
+        house_fee: houseFeeBrl,
+        net_amount: creditValue,
+        description: `Taxa da Casa ParedãoGK (R$ ${houseFeeBrl.toFixed(2)}) · Pagamento Pix ${receiptCode}`,
         status: 'completed',
-        receipt_code: receiptCode,
+        receipt_code: `${receiptCode}-FEE`,
         provider: 'mercadopago',
+        match_id: matchId || null,
+        arena_name: arenaName || null,
         created_at: nowIso,
-      },
-    ]);
-
-    if (txErr) {
-      return { credited: false, reason: txErr.message };
+      };
+      const feeTxRes = await resilientSupabaseUpsert(
+        supabaseClient,
+        'wallet_transactions',
+        feeTxRow,
+        'id'
+      );
+      if (feeTxRes.error) {
+        console.warn('[Webhook House Fee Tx Note]', feeTxRes.error.message);
+      }
     }
 
-    const { error: profUpdateErr } = await supabaseAdmin
-      .from('profiles')
-      .update({
-        wallet_balance: newBalance,
-        updated_at: nowIso,
-      })
-      .eq('id', userId);
+    // 3. Atualizar saldo na tabela profiles usando o nome exato da coluna existente
+    let profUpdateRes = await resilientSupabaseUpdate(
+      supabaseClient,
+      'profiles',
+      profileUpdatePayload,
+      'id',
+      targetUserId
+    );
 
-    if (profUpdateErr) {
-      return { credited: false, reason: profUpdateErr.message };
+    // Fallback de nome de coluna caso a coluna inferida falhe por cache/schema divergente
+    if (profUpdateRes.error) {
+      const missingCol = extractMissingColumnFromSupabaseError(profUpdateRes.error);
+      if (missingCol === custodyCol && custodyCol !== availableCol) {
+        nextAvailable = Number((currentAvailable + creditValue).toFixed(2));
+        const fallbackUpdate: Record<string, any> = {
+          [availableCol]: nextAvailable,
+        };
+        creditedColumn = availableCol;
+        profUpdateRes = await resilientSupabaseUpdate(
+          supabaseClient,
+          'profiles',
+          fallbackUpdate,
+          'id',
+          targetUserId
+        );
+      }
     }
 
-    await supabaseAdmin.from('notifications').insert([
+    if (profUpdateRes.error) {
+      return {
+        credited: false,
+        reason: `profiles_update_error: ${profUpdateRes.error.message}`,
+      };
+    }
+
+    // 4. Notificação resiliente ao usuário/goleiro
+    await resilientSupabaseUpsert(
+      supabaseClient,
+      'notifications',
       {
-        id: `notif-mp-${Date.now()}`,
-        user_id: userId,
+        id: `notif-mp-${cleanPaymentKey}-${Date.now().toString().slice(-4)}`,
+        user_id: targetUserId,
         category: 'wallet',
-        title: '💰 Recarga Pix Mercado Pago Confirmada!',
-        description: `Crédito de R$ ${amountBrl.toFixed(2)} adicionado à sua carteira digital. Comprovante: ${receiptCode}.`,
+        title: isCustodyCredit
+          ? '🛡️ Cachê Protegido em Custódia Mercado Pago!'
+          : isCustodyRelease
+          ? '🔓 Custódia Liberada para Saque!'
+          : '💰 Recarga Pix Mercado Pago Confirmada!',
+        description:
+          houseFeeBrl > 0
+            ? `Pagamento de R$ ${grossAmountBrl.toFixed(2)} confirmado (Taxa da Casa: R$ ${houseFeeBrl.toFixed(2)} · Valor líquido creditado: R$ ${creditValue.toFixed(2)}). Comprovante: ${receiptCode}.`
+            : `Crédito de R$ ${creditValue.toFixed(2)} adicionado à sua carteira digital. Comprovante: ${receiptCode}.`,
         read: false,
         created_at: nowIso,
       },
-    ]);
+      'id'
+    ).catch(() => undefined);
 
-    return { credited: true, newBalance };
+    return {
+      credited: true,
+      newBalance: nextAvailable,
+      newCustodyBalance: nextCustody,
+      creditedColumn,
+      resolvedTargetUserId: targetUserId,
+    };
   } catch (err: any) {
-    console.warn('[Server Webhook Supabase Credit Warning]', err?.message || err);
+    console.error('[Server Webhook Supabase Credit Error]', err?.message || err);
     return { credited: false, reason: err?.message || 'unexpected_error' };
   }
 }
@@ -505,61 +925,136 @@ async function processApprovedWebhookPayload(params: {
     event === 'payment.approved' ||
     event === 'pix.confirmed' ||
     event === 'pix.paid' ||
+    event === 'custody.released' ||
     statusNormalized === 'approved' ||
     statusNormalized === 'paid' ||
-    statusNormalized === 'confirmed';
+    statusNormalized === 'confirmed' ||
+    statusNormalized === 'released';
 
   const existingCharge = pixChargesStore.get(paymentId);
-  const amountBrl = Number(
+  const grossAmountBrl = Number(
     data?.transaction_amount ??
       data?.amount_brl ??
       (data?.amount ? Number(data.amount) / 100 : existingCharge?.amount ?? 0)
   );
+
+  // Recuperar userId mesmo em lambdas serverless stateless (metadata, external_reference ou payer.email)
+  const externalRef = String(data?.external_reference || parsedPayload?.external_reference || '');
+  const walletRefMatch = externalRef.match(/^wallet_([a-zA-Z0-9-]+?)_\d+$/);
   const userId = String(
     data?.metadata?.user_id ||
       parsedPayload?.metadata?.user_id ||
       data?.user_id ||
       existingCharge?.userId ||
+      walletRefMatch?.[1] ||
       ''
   ).trim();
+
+  const goalkeeperId = String(
+    data?.metadata?.goalkeeper_id ||
+      parsedPayload?.metadata?.goalkeeper_id ||
+      data?.goalkeeper_id ||
+      ''
+  ).trim();
+
+  const goalkeeperName = String(
+    data?.metadata?.goalkeeper_name ||
+      parsedPayload?.metadata?.goalkeeper_name ||
+      data?.goalkeeper_name ||
+      ''
+  ).trim();
+
+  const payerEmail = String(
+    data?.metadata?.payer_email ||
+      data?.payer?.email ||
+      parsedPayload?.payer?.email ||
+      ''
+  )
+    .trim()
+    .toLowerCase();
+
+  const rawPaymentType = String(
+    data?.metadata?.type ||
+      parsedPayload?.metadata?.type ||
+      existingCharge?.type ||
+      (externalRef.startsWith('mtch') || Boolean(goalkeeperId) ? 'match_booking' : 'wallet_deposit')
+  ).toLowerCase();
+  const paymentType: 'wallet_deposit' | 'match_booking' =
+    rawPaymentType === 'match_booking' ? 'match_booking' : 'wallet_deposit';
+
+  const explicitHouseFee = data?.house_fee_brl ?? data?.metadata?.house_fee_brl;
+  const houseFeeBrl =
+    explicitHouseFee !== undefined && explicitHouseFee !== null && explicitHouseFee !== ''
+      ? Math.min(grossAmountBrl, Math.max(0, Number(explicitHouseFee)))
+      : paymentType === 'match_booking' && grossAmountBrl > 0
+      ? Math.min(grossAmountBrl, HOUSE_FEE_BRL)
+      : 0;
+
+  const netAmountBrl = Number(Math.max(0, grossAmountBrl - houseFeeBrl).toFixed(2));
+
   const receiptCode = String(
     data?.pix_receipt ||
       existingCharge?.receiptCode ||
       `MP-${paymentId.replace(/[^a-zA-Z0-9]/g, '').slice(-6).toUpperCase() || Date.now().toString().slice(-6)}`
   );
 
+  const matchId = data?.metadata?.match_id || existingCharge?.matchId;
+  const arenaName = data?.metadata?.arena_name;
+
   let supabaseCredited = existingCharge?.supabaseCredited || false;
   let newWalletBalance: number | undefined;
+  let newCustodyBalance: number | undefined;
+  let creditedColumn: string | undefined;
+  let resolvedTargetUserId: string | undefined = goalkeeperId || userId || undefined;
+  let creditReason: string | undefined;
   let alreadyProcessed = existingCharge?.status === 'completed';
 
   if (isPaymentApprovedEvent && !alreadyProcessed) {
-    if (userId && amountBrl > 0) {
+    if (grossAmountBrl > 0 && (userId || goalkeeperId || goalkeeperName || payerEmail)) {
       const creditResult = await creditSupabaseWalletFromWebhook({
         paymentId,
         userId,
-        amountBrl,
+        goalkeeperId: goalkeeperId || undefined,
+        goalkeeperName: goalkeeperName || undefined,
+        payerEmail: payerEmail || undefined,
+        paymentType,
+        event,
+        grossAmountBrl,
+        houseFeeBrl,
+        netAmountBrl,
         receiptCode,
-        description: existingCharge?.description || 'Recarga Pix Mercado Pago Confirmada',
+        matchId,
+        arenaName,
+        description:
+          existingCharge?.description ||
+          data?.description ||
+          (paymentType === 'match_booking'
+            ? 'Contratação de Goleiro via Pix Mercado Pago'
+            : 'Recarga Carteira Digital ParedãoGK'),
       });
       supabaseCredited = creditResult.credited;
       newWalletBalance = creditResult.newBalance;
+      newCustodyBalance = creditResult.newCustodyBalance;
+      creditedColumn = creditResult.creditedColumn;
+      resolvedTargetUserId = creditResult.resolvedTargetUserId || resolvedTargetUserId;
+      creditReason = creditResult.reason;
       alreadyProcessed = Boolean(creditResult.alreadyProcessed);
+    } else {
+      creditReason = 'missing_payer_identifier_or_amount';
     }
 
     const updatedCharge: PixChargeRecord = {
       id: paymentId,
-      userId: userId || undefined,
-      type:
-        existingCharge?.type ||
-        (data?.metadata?.type === 'match_booking' ? 'match_booking' : 'wallet_deposit'),
-      amount: amountBrl,
+      userId: userId || resolvedTargetUserId || undefined,
+      type: paymentType,
+      amount: grossAmountBrl,
       status: 'completed',
       provider: existingCharge?.provider || 'mercadopago',
       qrCodeText: existingCharge?.qrCodeText || '',
       qrCodeBase64: existingCharge?.qrCodeBase64 || null,
       ticketUrl: existingCharge?.ticketUrl || null,
       receiptCode,
-      matchId: data?.metadata?.match_id || existingCharge?.matchId,
+      matchId,
       description: existingCharge?.description,
       supabaseCredited,
       createdAt: existingCharge?.createdAt || nowIso,
@@ -575,14 +1070,23 @@ async function processApprovedWebhookPayload(params: {
     authenticated: hmacValid,
     event,
     status: data?.status || 'processed',
+    paymentType,
     paymentId,
-    userId: userId || undefined,
-    amount: amountBrl,
+    userId: userId || resolvedTargetUserId || undefined,
+    goalkeeperId: goalkeeperId || undefined,
+    resolvedTargetUserId,
+    amount: grossAmountBrl,
+    grossAmount: grossAmountBrl,
+    houseFee: houseFeeBrl,
+    netAmount: netAmountBrl,
+    creditedColumn,
     receiptCode,
     supabaseCredited,
+    creditReason,
     newWalletBalance,
+    newCustodyBalance,
     alreadyProcessed,
-    matchId: data?.metadata?.match_id,
+    matchId,
     processedAt: nowIso,
   };
 
@@ -733,6 +1237,9 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       user: bodyUser,
       matchId,
       userId,
+      goalkeeperId,
+      goalkeeperName,
+      arenaName,
       publicKey: bodyPublicKey,
       mercadoPagoPublicKey,
       idempotencyKey: bodyIdempotencyKey,
@@ -947,12 +1454,28 @@ async function handleGerarPixMercadoPago(req: Request, res: Response) {
       .replace(/[^a-zA-Z0-9_-]/g, '')
       .slice(0, 64);
 
+    const resolvedHouseFee = type === 'match_booking' ? Math.min(paymentAmount, HOUSE_FEE_BRL) : 0;
+    const resolvedNetAmount = Number(Math.max(0, paymentAmount - resolvedHouseFee).toFixed(2));
+
     const metadataPayload: Record<string, string> = {
       platform: 'ParedaoGK',
       type: String(type === 'match_booking' ? 'match_booking' : 'wallet_deposit'),
+      payer_email: resolvedEmail,
+      gross_amount_brl: paymentAmount.toFixed(2),
+      house_fee_brl: resolvedHouseFee.toFixed(2),
+      net_amount_brl: resolvedNetAmount.toFixed(2),
     };
     if (resolvedUserId) {
       metadataPayload.user_id = String(resolvedUserId);
+    }
+    if (goalkeeperId) {
+      metadataPayload.goalkeeper_id = String(goalkeeperId);
+    }
+    if (goalkeeperName) {
+      metadataPayload.goalkeeper_name = String(goalkeeperName).slice(0, 80);
+    }
+    if (arenaName) {
+      metadataPayload.arena_name = String(arenaName).slice(0, 80);
     }
     if (matchId || type === 'match_booking') {
       metadataPayload.match_id = String(matchId || `mtch-${Date.now()}`);
@@ -1371,10 +1894,14 @@ app.get('/api/mercadopago/payment-status/:paymentId', async (req: Request, res: 
  */
 app.post('/api/mercadopago/simulate-webhook', async (req: Request, res: Response) => {
   try {
-    const { paymentId, amount, userId, description } = req.body || {};
+    const { paymentId, amount, userId, goalkeeperId, payerEmail, matchId, type, houseFee, description } = req.body || {};
     const resolvedPaymentId = String(paymentId || `mp_sim_${Date.now()}`);
     const existingCharge = pixChargesStore.get(resolvedPaymentId);
     const resolvedAmount = Number(amount || existingCharge?.amount || 25);
+    const resolvedType =
+      type === 'match_booking' || existingCharge?.type === 'match_booking' || Boolean(goalkeeperId)
+        ? 'match_booking'
+        : 'wallet_deposit';
 
     if (!resolvedAmount || isNaN(resolvedAmount) || resolvedAmount <= 0) {
       return res.status(400).json({
@@ -1397,13 +1924,18 @@ app.post('/api/mercadopago/simulate-webhook', async (req: Request, res: Response
         id: resolvedPaymentId,
         transaction_amount: resolvedAmount,
         amount_brl: resolvedAmount,
+        ...(houseFee !== undefined ? { house_fee_brl: Number(houseFee) } : {}),
         currency_id: 'BRL',
         status: 'approved',
         pix_receipt: receiptCode,
+        ...(payerEmail ? { payer: { email: String(payerEmail).trim().toLowerCase() } } : {}),
         metadata: {
           platform: 'ParedaoGK',
-          type: 'wallet_deposit',
+          type: resolvedType,
           user_id: userId || existingCharge?.userId || undefined,
+          goalkeeper_id: goalkeeperId || undefined,
+          match_id: matchId || existingCharge?.matchId || undefined,
+          payer_email: payerEmail ? String(payerEmail).trim().toLowerCase() : undefined,
           description: description || 'Recarga Carteira Digital ParedãoGK (Mercado Pago)',
           simulation: true,
         },
@@ -1585,9 +2117,17 @@ async function handleWebhookMercadoPago(req: Request, res: Response) {
 
     console.log(`[Mercado Pago Webhook] Evento processado: ${responseBody.event}`, {
       paymentId: responseBody.paymentId,
-      amount: responseBody.amount,
+      paymentType: responseBody.paymentType,
+      grossAmount: responseBody.grossAmount,
+      houseFee: responseBody.houseFee,
+      netAmount: responseBody.netAmount,
       userId: responseBody.userId,
+      resolvedTargetUserId: responseBody.resolvedTargetUserId,
+      creditedColumn: responseBody.creditedColumn,
+      newWalletBalance: responseBody.newWalletBalance,
+      newCustodyBalance: responseBody.newCustodyBalance,
       supabaseCredited: responseBody.supabaseCredited,
+      creditReason: responseBody.creditReason,
     });
 
     return res.status(200).json(responseBody);
