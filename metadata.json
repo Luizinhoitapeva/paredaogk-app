@@ -1,0 +1,6 @@
+{
+  "name": "ParedãoGK - Aluguel de Goleiros & Gestão de Futebol",
+  "description": "Ecossistema profissional para contratação de goleiros amadores, carteira digital Pix, radar inteligente e gestão integrada ao ArenaDraft.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
