@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { UserProfile, UserRole, TabType, MatchBooking, Goalkeeper, Conversation, ChatMessage, WeeklyMatchTemplate, PostMatchAiFeedbackResult, Transaction, WalletDashboardSummary, ArenaField } from './types';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { UserProfile, UserRole, TabType, MatchBooking, MatchGoalkeeperCandidate, Goalkeeper, Conversation, ChatMessage, WeeklyMatchTemplate, PostMatchAiFeedbackResult, Transaction, WalletDashboardSummary, ArenaField } from './types';
 import {
   INITIAL_USER,
   INITIAL_ITAPEVA_ARENAS,
@@ -34,6 +34,7 @@ import { ChatTab } from './components/ChatTab';
 import { NotificationsTab } from './components/NotificationsTab';
 import { WalletTab } from './components/WalletTab';
 import { IntelligentCallModal } from './components/IntelligentCallModal';
+import { CustodyPaymentModal } from './components/CustodyPaymentModal';
 import { MatchHistoryModal } from './components/MatchHistoryModal';
 import { PostMatchReviewModal } from './components/PostMatchReviewModal';
 import { FutshopModal } from './components/FutshopModal';
@@ -67,12 +68,34 @@ import {
 
 export type ThemeMode = 'dark' | 'light';
 
+const ACTIVE_TAB_KEY = 'paredaogk-active-tab';
+const ONBOARDING_DONE_KEY = 'paredaogk-onboarding-completed';
+const CALL_MODAL_OPEN_KEY = 'paredaogk-call-modal-open';
+
 export default function App() {
-  // Navigation & State
-  const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
+  // Navigation & State (persistido no localStorage para nunca resetar ao trocar de aba ou perder foco)
+  const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem(ONBOARDING_DONE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<UserProfile>(INITIAL_USER);
-  const [currentTab, setCurrentTab] = useState<TabType>('home');
+  const [currentTab, setCurrentTab] = useState<TabType>(() => {
+    if (typeof window === 'undefined') return 'home';
+    try {
+      const saved = localStorage.getItem(ACTIVE_TAB_KEY) as TabType | null;
+      if (saved && ['home', 'chat', 'notifications', 'wallet', 'performance'].includes(saved)) {
+        return saved;
+      }
+    } catch {
+      // ignore
+    }
+    return 'home';
+  });
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     if (typeof window !== 'undefined') {
@@ -80,6 +103,22 @@ export default function App() {
     }
     return 'dark';
   });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ONBOARDING_DONE_KEY, hasCompletedOnboarding ? 'true' : 'false');
+    } catch {
+      // ignore
+    }
+  }, [hasCompletedOnboarding]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACTIVE_TAB_KEY, currentTab);
+    } catch {
+      // ignore
+    }
+  }, [currentTab]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return;
@@ -103,7 +142,26 @@ export default function App() {
 
   // Modals
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [isIntelligentCallOpen, setIsIntelligentCallOpen] = useState(false);
+  const [isIntelligentCallOpen, setIsIntelligentCallOpen] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem(CALL_MODAL_OPEN_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [custodyPaymentTarget, setCustodyPaymentTarget] = useState<{
+    match: MatchBooking;
+    candidate: MatchGoalkeeperCandidate;
+  } | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CALL_MODAL_OPEN_KEY, isIntelligentCallOpen ? 'true' : 'false');
+    } catch {
+      // ignore
+    }
+  }, [isIntelligentCallOpen]);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isFutshopModalOpen, setIsFutshopModalOpen] = useState(false);
   const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
@@ -227,16 +285,23 @@ export default function App() {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
-      if (
-        (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') &&
-        session?.user
-      ) {
+      if (event === 'SIGNED_IN' && session?.user) {
         fetchOrCreateSupabaseProfile({ authUser: session.user }).then((syncedProfile) => {
-          setCurrentUser(syncedProfile);
+          setCurrentUser((prev) =>
+            prev.id === syncedProfile.id ? { ...syncedProfile, role: prev.role } : syncedProfile
+          );
           setHasCompletedOnboarding(true);
-          if (event === 'SIGNED_IN') {
-            setIsAuthModalOpen(false);
+          setIsAuthModalOpen(false);
+        });
+      } else if ((event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') && session?.user) {
+        setCurrentUser((prev) => {
+          if (prev.id === 'usr-guest') {
+            fetchOrCreateSupabaseProfile({ authUser: session.user }).then((syncedProfile) => {
+              setCurrentUser(syncedProfile);
+              setHasCompletedOnboarding(true);
+            });
           }
+          return prev;
         });
       } else if (event === 'SIGNED_OUT') {
         clearOfflineUserProfile().catch(() => undefined);
@@ -376,13 +441,21 @@ export default function App() {
     }
   }, [arenas]);
 
+  const currentUserRef = useRef(currentUser);
+  currentUserRef.current = currentUser;
+
+  const approvedArenas = useMemo(
+    () => arenas.filter((a) => a.status === 'approved'),
+    [arenas]
+  );
+
   // Supabase Realtime: Escuta instantânea nas tabelas notifications, matches e canal de broadcast Mercado Pago
   useEffect(() => {
     const unsubscribeRealtime = subscribeToRealtimeBookingsAndNotifications({
-      onNotification: (notification) => {
+      onNotification: () => {
         setUnreadNotifications((prev) => prev + 1);
       },
-      onMatchChange: (matchRecord, eventType) => {
+      onMatchChange: (matchRecord) => {
         if (!matchRecord) return;
         setMatches((prev) => {
           const exists = prev.some((m) => m.id === matchRecord.id);
@@ -393,42 +466,67 @@ export default function App() {
         });
       },
       onGoalkeeperCallAlert: (callData) => {
-        // Formatar objeto de convocação recebido via Realtime
+        const activeUser = currentUserRef.current;
+        const resolvedStatus = callData.status || 'confirmed';
+        const resolvedPaymentStatus =
+          callData.paymentStatus ||
+          callData.payment_status ||
+          (resolvedStatus === 'searching' ? 'pending' : 'paid');
+
         const formattedBooking: MatchBooking = {
           id: callData.id || `match-rt-${Date.now()}`,
           organizerId: callData.organizerId || callData.organizer_id || '',
           organizerName: callData.organizerName || callData.organizer_name || 'Capitão Organizador',
-          goalkeeperId: callData.goalkeeperId || callData.goalkeeper_id || currentUser.id,
-          goalkeeperName: callData.goalkeeperName || callData.goalkeeper_name || currentUser.name,
-          goalkeeperPhoto:
-            callData.goalkeeperPhoto ||
-            callData.goalkeeper_photo ||
-            '',
+          goalkeeperId: callData.goalkeeperId || callData.goalkeeper_id,
+          goalkeeperName: callData.goalkeeperName || callData.goalkeeper_name,
+          goalkeeperPhoto: callData.goalkeeperPhoto || callData.goalkeeper_photo || '',
           arenaName: callData.arenaName || callData.arena_name || 'Arena Itapeva',
           address: callData.address || 'Itapeva - SP',
           city: callData.city || 'Itapeva - SP',
           date: callData.date || new Date().toLocaleDateString('pt-BR'),
           time: callData.time || '19:30 - 21:00',
+          durationMinutes: callData.durationMinutes ? Number(callData.durationMinutes) : undefined,
           modality: (callData.modality as any) || 'Society',
           competitiveLevel: (callData.competitiveLevel as any) || (callData.competitive_level as any) || 'Competitivo',
+          gameLevel: callData.gameLevel,
+          goalkeeperSlotsCount: callData.goalkeeperSlotsCount === 2 ? 2 : 1,
+          slots: Array.isArray(callData.slots) ? callData.slots : undefined,
+          candidates: Array.isArray(callData.candidates) ? callData.candidates : undefined,
           price: Number(callData.price || 25),
           houseFee: Number(callData.houseFee || 5),
           goalkeeperPayout: Number(callData.goalkeeperPayout || Math.max(0, Number(callData.price || 25) - 5)),
           cashbackEarned: Number(callData.cashbackEarned || callData.cashback_earned || 2.5),
-          status: 'confirmed',
+          status: resolvedStatus,
+          operationalStatus:
+            callData.operationalStatus ||
+            (resolvedStatus === 'searching' ? 'awaiting_acceptance' : 'accepted'),
+          radiusKm: callData.radiusKm ? Number(callData.radiusKm) : 30,
           createdAt: callData.createdAt || callData.created_at || new Date().toISOString(),
-          paymentStatus: 'paid',
-          notes: callData.notes || 'Partida confirmada via Radar ParedãoGK Itapeva.',
+          paymentStatus: resolvedPaymentStatus,
+          notes: callData.notes || 'Partida publicada via Radar ParedãoGK Itapeva.',
         };
 
-        setRealtimeAlertBooking(formattedBooking);
-        setIsCallAlertOpen(true);
+        const isOwnCreatedFreeCall =
+          formattedBooking.organizerId === activeUser.id && resolvedPaymentStatus !== 'paid';
+
+        if (
+          !isOwnCreatedFreeCall &&
+          (activeUser.role === 'goleiro' ||
+            formattedBooking.organizerId === 'org-realtime-test' ||
+            Boolean(callData.sosTriggered))
+        ) {
+          setRealtimeAlertBooking(formattedBooking);
+          setIsCallAlertOpen(true);
+        }
+
         setUnreadNotifications((prev) => prev + 1);
         setRecentBooking(formattedBooking);
 
-        // Atualizar lista de partidas
+        // Atualizar lista de partidas sem duplicar
         setMatches((prev) => {
-          if (prev.some((m) => m.id === formattedBooking.id)) return prev;
+          if (prev.some((m) => m.id === formattedBooking.id)) {
+            return prev.map((m) => (m.id === formattedBooking.id ? { ...m, ...formattedBooking } : m));
+          }
           return [formattedBooking, ...prev];
         });
       },
@@ -446,7 +544,7 @@ export default function App() {
     return () => {
       unsubscribeRealtime();
     };
-  }, [currentUser]);
+  }, [currentUser.id]);
 
   // Simular evento em tempo real da liquidação do Pix Mercado Pago (para teste no front-end)
   const handleSimulateRealtimeCall = async () => {
@@ -520,8 +618,15 @@ export default function App() {
         },
       ],
     };
-    setConversations((prev) => [newConv, ...prev]);
-    setCurrentTab('chat');
+    setConversations((prev) => {
+      const exists = prev.some((c) => c.id === newConv.id);
+      return exists ? prev : [newConv, ...prev];
+    });
+    if (booking.paymentStatus === 'paid') {
+      setCurrentTab('chat');
+    } else {
+      setCurrentTab('home');
+    }
   };
 
   // Direct WhatsApp support trigger
@@ -748,44 +853,95 @@ export default function App() {
     setUnreadNotifications((prev) => prev + 1);
   };
 
-  // Handle booking confirmed
+  // Handle booking published (free radar) or confirmed (paid custody)
   const handleBookingConfirmed = (booking: MatchBooking) => {
     setRecentBooking(booking);
     setUnreadNotifications((prev) => prev + 1);
+
+    if (booking.paymentStatus === 'paid') {
+      setCurrentUser((prev) => ({
+        ...prev,
+        walletBalance: Math.max(0, prev.walletBalance - booking.price),
+        cashbackBalance: prev.cashbackBalance + booking.cashbackEarned,
+        matchesPlayed: prev.matchesPlayed + 1,
+      }));
+    }
+
+    setMatches((prev) => {
+      const exists = prev.some((m) => m.id === booking.id);
+      return exists
+        ? prev.map((m) => (m.id === booking.id ? booking : m))
+        : [booking, ...prev];
+    });
+  };
+
+  // Abrir modal de pagamento somente quando o contratante selecionar o goleiro que aceitou/se candidatou
+  const handleSelectGoalkeeperForPayment = (
+    match: MatchBooking,
+    candidate: MatchGoalkeeperCandidate
+  ) => {
+    setCustodyPaymentTarget({ match, candidate });
+  };
+
+  // Efetivar custódia pós-pagamento (Pix Mercado Pago / Saldo / Homologação)
+  const handleCustodyConfirmed = (
+    paidMatch: MatchBooking,
+    paymentMethod: 'pix' | 'wallet' | 'homologation'
+  ) => {
+    setRecentBooking(paidMatch);
+    setMatches((prev) => {
+      const exists = prev.some((m) => m.id === paidMatch.id);
+      return exists
+        ? prev.map((m) => (m.id === paidMatch.id ? paidMatch : m))
+        : [paidMatch, ...prev];
+    });
+    setUnreadNotifications((prev) => prev + 1);
+
     setCurrentUser((prev) => ({
       ...prev,
-      walletBalance: Math.max(0, prev.walletBalance - booking.price),
-      cashbackBalance: prev.cashbackBalance + booking.cashbackEarned,
+      walletBalance:
+        paymentMethod === 'wallet'
+          ? Math.max(0, Number((prev.walletBalance - paidMatch.price).toFixed(2)))
+          : prev.walletBalance,
+      cashbackBalance: prev.cashbackBalance + (paidMatch.cashbackEarned || 0),
       matchesPlayed: prev.matchesPlayed + 1,
     }));
 
-    // Create real match conversation thread for this booking
     const newConv: Conversation = {
-      id: `conv-${booking.id}`,
-      participantId: booking.goalkeeperId || 'gk-match',
-      participantName: booking.goalkeeperName || 'Goleiro Convocado',
+      id: `conv-${paidMatch.id}`,
+      participantId: paidMatch.goalkeeperId || 'gk-match',
+      participantName: paidMatch.goalkeeperName || 'Goleiro Convocado',
       participantNickname: 'Goleiro Escalado',
       participantRole: 'goleiro',
-      participantAvatar: booking.goalkeeperPhoto || '',
+      participantAvatar: paidMatch.goalkeeperPhoto || '',
       participantRating: 4.95,
-      arenaName: booking.arenaName,
-      matchDate: `${booking.date}`,
-      lastMessage: 'Convocação confirmada! Canal de alinhamento pré-jogo aberto.',
-      lastMessageTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      arenaName: paidMatch.arenaName,
+      matchDate: `${paidMatch.date}`,
+      lastMessage: 'Custódia confirmada! Canal de alinhamento pré-jogo aberto.',
+      lastMessageTime: new Date().toLocaleTimeString('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
       unreadCount: 0,
       messages: [
         {
           id: `msg-sys-${Date.now()}`,
           senderId: 'system',
-          text: `Partida confirmada na ${booking.arenaName} (${booking.date}). Canal liberado para alinhamento de uniforme e horário de chegada.`,
-          timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          text: `Custódia confirmada na ${paidMatch.arenaName} (${paidMatch.date} · ${paidMatch.time}). Canal liberado para alinhamento de uniforme e chegada.`,
+          timestamp: new Date().toLocaleTimeString('pt-BR', {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
           isMine: false,
-          status: 'read'
-        }
-      ]
+          status: 'read',
+        },
+      ],
     };
-    setConversations((prev) => [newConv, ...prev]);
-    setMatches((prev) => [booking, ...prev]);
+    setConversations((prev) => {
+      const exists = prev.some((c) => c.id === newConv.id);
+      return exists ? prev : [newConv, ...prev];
+    });
+    setCustodyPaymentTarget(null);
   };
 
   // Abrir modal de avaliação pós-jogo
@@ -942,7 +1098,19 @@ export default function App() {
   // Handle Logout (limpa cache local, encerra sessão real Supabase e volta para autenticação)
   const handleLogout = () => {
     clearOfflineUserProfile().catch(() => undefined);
+    try {
+      localStorage.removeItem(ACTIVE_TAB_KEY);
+      localStorage.removeItem(ONBOARDING_DONE_KEY);
+      localStorage.removeItem(CALL_MODAL_OPEN_KEY);
+      localStorage.removeItem('paredaogk-call-draft-v1');
+      localStorage.removeItem('paredaogk-home-filters-v1');
+    } catch {
+      // ignore
+    }
     setCurrentUser(INITIAL_USER);
+    setCurrentTab('home');
+    setIsIntelligentCallOpen(false);
+    setCustodyPaymentTarget(null);
     setIsArenaModerationOpen(false);
     setIsAdminFinancialOpen(false);
     if (isSupabaseConfigured) {
@@ -1086,6 +1254,7 @@ export default function App() {
             recentBooking={recentBooking}
             onOpenReviewModal={handleOpenReviewModal}
             onAcceptMatchVacancy={handleAcceptMatchVacancy}
+            onSelectGoalkeeperForPayment={handleSelectGoalkeeperForPayment}
             onTrigger20MinEnRouteAlert={handleTrigger20MinEnRouteAlert}
             onConfirmEnRoute20m={handleConfirmEnRoute20m}
             onOpenHistory={() => setIsHistoryModalOpen(true)}
@@ -1264,7 +1433,7 @@ export default function App() {
         </>
       )}
 
-      {/* Intelligent GK Radar Matchmaking Modal */}
+      {/* Intelligent GK Radar Matchmaking Modal (Publicação 100% Gratuita + Rascunho Persistido) */}
       <IntelligentCallModal
         isOpen={isIntelligentCallOpen}
         onClose={() => {
@@ -1278,8 +1447,19 @@ export default function App() {
         prefillArena={prefillArena}
         prefillTemplate={prefillTemplate}
         prefillGoalkeeper={prefillGoalkeeper}
-        approvedArenas={arenas.filter((a) => a.status === 'approved')}
+        approvedArenas={approvedArenas}
         recentMatches={matches}
+        onOpenAuth={() => setIsAuthModalOpen(true)}
+      />
+
+      {/* Modal de Pagamento de Custódia (Aberto somente após aceite & escolha do goleiro) */}
+      <CustodyPaymentModal
+        isOpen={Boolean(custodyPaymentTarget)}
+        onClose={() => setCustodyPaymentTarget(null)}
+        match={custodyPaymentTarget?.match || null}
+        selectedCandidate={custodyPaymentTarget?.candidate || null}
+        user={currentUser}
+        onCustodyConfirmed={handleCustodyConfirmed}
         onOpenAuth={() => setIsAuthModalOpen(true)}
       />
 

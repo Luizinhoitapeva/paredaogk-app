@@ -74,11 +74,24 @@ export type MatchSlotMode = 'random' | 'specific' | 'mixed';
 
 export type MatchOperationalStatus =
   | 'awaiting_acceptance'
+  | 'awaiting_custody_payment'
   | 'accepted'
   | 'en_route'
   | 'arrived'
   | 'completed'
   | 'cancelled';
+
+export interface MatchGoalkeeperCandidate {
+  id: string;
+  name: string;
+  nickname?: string;
+  photo?: string;
+  rating?: number;
+  distanceKm?: number;
+  phone?: string;
+  appliedAt: string;
+  slotIndex?: number;
+}
 
 export interface MatchGoalkeeperSlot {
   slotIndex: number;
@@ -153,6 +166,7 @@ export interface MatchBooking {
   goalkeeperSlotsCount?: 1 | 2;
   selectionMode?: MatchSlotMode;
   slots?: MatchGoalkeeperSlot[];
+  candidates?: MatchGoalkeeperCandidate[];
   operationalStatus?: MatchOperationalStatus;
   acceptedAt?: string;
   radiusKm?: number;

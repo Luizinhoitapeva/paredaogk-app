@@ -96,7 +96,9 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   {booking.sosTriggered
                     ? `Vaga urgente num raio de ${booking.sosRadiusKm || 30}km com bônus garantido.`
-                    : `${slotsCount} vaga(s) aberta(s) · Cachê retido em custódia segura.`}
+                    : booking.paymentStatus === 'paid'
+                    ? `${slotsCount} vaga(s) aberta(s) · Cachê retido em custódia segura.`
+                    : `${slotsCount} vaga(s) no radar (30 km) · Custódia efetivada após seleção.`}
                 </p>
               </div>
             </div>
@@ -128,7 +130,9 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
           <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 to-slate-50 dark:from-emerald-950/60 dark:to-slate-950 border border-emerald-500/40 flex items-center justify-between shadow-md">
             <div>
               <span className="text-[11px] font-mono uppercase tracking-wider text-slate-600 dark:text-slate-400 block">
-                Cachê Garantido em Custódia (Líquido/Vaga)
+                {booking.paymentStatus === 'paid'
+                  ? 'Cachê Garantido em Custódia (Líquido/Vaga)'
+                  : 'Cachê Líquido Proposto (Pós-Aceite/Vaga)'}
               </span>
               <div className="font-mono tabular-nums text-2xl font-extrabold text-emerald-600 dark:text-[#22c55e] mt-0.5">
                 {formatCurrency(netCacheValue)}
@@ -140,7 +144,7 @@ export const GoalkeeperCallAlertModal: React.FC<GoalkeeperCallAlertModalProps> =
             <div className="text-right">
               <span className="inline-flex items-center gap-1 text-[11px] font-bold text-sky-700 dark:text-[#38bdf8] bg-sky-500/10 px-2.5 py-1 rounded-md border border-sky-500/30">
                 <Zap className="w-3.5 h-3.5" />
-                Custódia Protegida
+                {booking.paymentStatus === 'paid' ? 'Custódia Protegida' : 'Aguardando Aceite'}
               </span>
               <div className="text-[10px] text-slate-500 mt-1">Raio {booking.radiusKm || 30} km</div>
             </div>

@@ -3142,6 +3142,83 @@ app.post('/api/convocacao/notificar-goleiros', async (req: Request, res: Respons
 });
 
 /**
+ * 4.5 Rota de API: POST /api/convocacao/publicar-radar
+ * Publica a partida gratuitamente no radar de 30 km (status: 'searching', payment_status: 'pending')
+ * sem bloquear ou cobrar o contratante antecipadamente.
+ */
+app.post('/api/convocacao/publicar-radar', async (req: Request, res: Response) => {
+  try {
+    const { match, organizerUserId } = req.body || {};
+    if (!match || !match.arenaName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Dados da partida obrigatórios para publicar no radar.',
+      });
+    }
+
+    const slotsCount = Math.min(
+      2,
+      Math.max(1, Number(match.goalkeeperSlotsCount || match.slots?.length || 1))
+    );
+    const totalAmount = Number(match.price || 25);
+    const totalHouseFee = Math.min(totalAmount, HOUSE_FEE_BRL * slotsCount);
+    const totalNetCustody = Number(Math.max(0, totalAmount - totalHouseFee).toFixed(2));
+    const nowIso = new Date().toISOString();
+    const cleanMatchKey = String(match.id || `mtch-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
+
+    const supabaseClient = getServerSupabaseAdminClient(false);
+    let matchPersisted = false;
+
+    if (supabaseClient) {
+      const matchRow: Record<string, any> = {
+        id: cleanMatchKey,
+        organizer_id: isValidUuid(match.organizerId)
+          ? match.organizerId
+          : isValidUuid(organizerUserId)
+          ? organizerUserId
+          : null,
+        organizer_name: match.organizerName || 'Contratante',
+        goalkeeper_id: isValidUuid(match.goalkeeperId) ? match.goalkeeperId : null,
+        goalkeeper_name: match.goalkeeperName || 'Aguardando Aceite / No Radar (30 km)',
+        arena_name: match.arenaName,
+        address: match.address || 'Itapeva - SP',
+        city: match.city || 'Itapeva - SP',
+        date: match.date || 'Hoje',
+        time: match.time || '20:00 - 21:00',
+        modality: match.modality || 'Society',
+        competitive_level: match.gameLevel || match.competitiveLevel || 'Médio',
+        price: totalAmount,
+        house_fee: totalHouseFee,
+        goalkeeper_payout: totalNetCustody,
+        cashback_earned: Number((totalAmount * 0.1).toFixed(2)),
+        status: 'searching',
+        payment_provider: 'pending',
+        payment_status: 'pending',
+        notes: match.notes || '',
+        created_at: match.createdAt || nowIso,
+      };
+
+      const matchRes = await resilientSupabaseUpsert(supabaseClient, 'matches', matchRow, 'id');
+      matchPersisted = !matchRes.error;
+    }
+
+    return res.status(200).json({
+      success: true,
+      matchId: cleanMatchKey,
+      status: 'searching',
+      paymentStatus: 'pending',
+      matchPersisted,
+    });
+  } catch (err: any) {
+    console.error('[Publicar Radar Gratis Error]', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao publicar partida gratuitamente no radar.',
+    });
+  }
+});
+
+/**
  * 5. Rota de API: POST /api/convocacao/confirmar-custodia
  * Persiste a partida no Supabase, aplica a retenção fixa da Taxa da Casa (R$ 5,00 por vaga)
  * e credita o líquido correspondente em custódia (pending_balance) + wallet_transactions.

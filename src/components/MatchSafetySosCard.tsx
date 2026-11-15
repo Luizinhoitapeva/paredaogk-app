@@ -10,7 +10,7 @@ import {
   GkAiSparkIcon,
   GkClockIcon as Clock,
 } from './icons';
-import { Goalkeeper, MatchBooking, UserRole } from '../types';
+import { Goalkeeper, MatchBooking, MatchGoalkeeperCandidate, UserRole } from '../types';
 import { formatCurrency } from '../utils/validations';
 import { ITAPEVA_HOUSE_FEE } from '../utils/cachePricingAI';
 import { formatDurationLabel } from '../utils/geoMatchmaking';
@@ -21,6 +21,10 @@ interface MatchSafetySosCardProps {
   allGoalkeepers: Goalkeeper[];
   onOpenReviewModal?: (booking: MatchBooking) => void;
   onAcceptMatchVacancy?: (match: MatchBooking) => Promise<void> | void;
+  onSelectGoalkeeperForPayment?: (
+    match: MatchBooking,
+    candidate: MatchGoalkeeperCandidate
+  ) => void;
   onTrigger20MinEnRouteAlert?: (match: MatchBooking) => Promise<void> | void;
   onConfirmEnRoute20m?: (match: MatchBooking) => Promise<void> | void;
   onUpdateSafetyStatus: (
@@ -48,6 +52,7 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
   allGoalkeepers,
   onOpenReviewModal,
   onAcceptMatchVacancy,
+  onSelectGoalkeeperForPayment,
   onTrigger20MinEnRouteAlert,
   onConfirmEnRoute20m,
   onUpdateSafetyStatus,
@@ -97,8 +102,13 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
   };
 
   const isSosActive = Boolean(match.sosTriggered);
+  const isPaymentPending = match.paymentStatus !== 'paid';
+  const candidates = Array.isArray(match.candidates) ? match.candidates : [];
+  const hasCandidates = candidates.length > 0;
   const isAwaitingAcceptance =
-    match.status === 'searching' || match.operationalStatus === 'awaiting_acceptance';
+    match.status === 'searching' ||
+    match.operationalStatus === 'awaiting_acceptance' ||
+    match.operationalStatus === 'awaiting_custody_payment';
   const isEnRoute = Boolean(
     match.operationalStatus === 'en_route' ||
       match.enRoute20mConfirmed ||
@@ -158,12 +168,20 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
                   ? 'Goleiro A Caminho da Arena!'
                   : isSosActive
                   ? 'Alerta SOS Ativo · Substituição Relâmpago'
+                  : isPaymentPending && hasCandidates
+                  ? `${candidates.length} Goleiro(s) Aceitou · Selecione para Pagar Custódia`
                   : isAwaitingAcceptance
-                  ? `Buscando Goleiro (${match.radiusKm || 30} km)`
+                  ? `Aguardando Aceite / No Radar (${match.radiusKm || 30} km)`
                   : match.goalkeeperCancelled
                   ? 'Goleiro Não Confirmou / Cancelou'
                   : 'Convocação Confirmada!'}
               </span>
+
+              {isPaymentPending && match.status !== 'completed' && (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/35 font-bold">
+                  Publicação Gratuita · Pgto Pós-Aceite
+                </span>
+              )}
 
               {isEnRoute && (
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-[#22c55e] text-slate-950 font-extrabold">
@@ -224,8 +242,75 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
         </div>
       )}
 
-      {/* BANNER PARA GOLEIRO ACEITAR CONVOCAÇÃO QUANDO EM BUSCA / ABERTO */}
-      {isAwaitingAcceptance && onAcceptMatchVacancy && match.status !== 'completed' && (
+      {/* CANDIDATOS QUE ACEITARAM -> CONTRATANTE SELECIONA & PAGA CUSTÓDIA (PIX / SALDO) */}
+      {isPaymentPending && match.status !== 'completed' && (
+        <div className="p-3.5 rounded-2xl bg-sky-500/10 border border-sky-500/35 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs">
+              <span className="font-extrabold text-slate-900 dark:text-white block">
+                {hasCandidates
+                  ? `${candidates.length} Goleiro(s) Aceitou / Se Candidatou à Vaga`
+                  : `Vaga Aberta no Radar (${match.radiusKm || 30} km) · Aguardando Aceite`}
+              </span>
+              <span className="text-[11px] text-slate-600 dark:text-slate-300">
+                {hasCandidates
+                  ? 'Selecione o goleiro abaixo para abrir o pagamento (Pix Mercado Pago / Saldo) e ativar a custódia.'
+                  : `Cachê líquido de ${formatCurrency(effectiveNetCustody / slotsCount)} por vaga. Nenhuma cobrança feita ainda.`}
+              </span>
+            </div>
+
+            {onAcceptMatchVacancy && (userRole === 'goleiro' || !hasCandidates) && (
+              <button
+                type="button"
+                onClick={() => onAcceptMatchVacancy(match)}
+                className="min-h-[40px] px-4 rounded-xl bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-xs cursor-pointer transition-all active:scale-95"
+              >
+                {userRole === 'goleiro'
+                  ? 'Aceitar / Candidatar-se à Vaga'
+                  : 'Registrar Aceite de Goleiro'}
+              </button>
+            )}
+          </div>
+
+          {hasCandidates && onSelectGoalkeeperForPayment && (
+            <div className="space-y-2">
+              {candidates.map((cand) => (
+                <div
+                  key={cand.id}
+                  className="p-3 rounded-xl bg-white dark:bg-[#020617] border border-emerald-500/40 flex flex-wrap items-center justify-between gap-2.5"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-emerald-700 dark:text-[#22c55e] font-extrabold text-xs flex items-center justify-center shrink-0">
+                      {(cand.name || 'GK').slice(0, 2).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                        {cand.name}
+                        {cand.nickname ? ` (${cand.nickname})` : ''}
+                      </div>
+                      <div className="text-[10px] text-emerald-700 dark:text-[#22c55e] font-semibold">
+                        Aceitou a vaga{cand.rating ? ` · ★ ${cand.rating}` : ''}
+                        {cand.distanceKm !== undefined ? ` · ${cand.distanceKm} km` : ''}
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => onSelectGoalkeeperForPayment(match, cand)}
+                    className="min-h-[38px] px-3.5 rounded-xl bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-xs cursor-pointer transition-all active:scale-95 shrink-0"
+                  >
+                    Selecionar & Pagar Custódia ({formatCurrency(match.price)})
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* BANNER PARA GOLEIRO ACEITAR CONVOCAÇÃO QUANDO JÁ PAGA (SOS / SUBSTITUIÇÃO) */}
+      {!isPaymentPending && isAwaitingAcceptance && onAcceptMatchVacancy && match.status !== 'completed' && (
         <div className="p-3.5 rounded-2xl bg-sky-500/10 border border-sky-500/35 flex flex-wrap items-center justify-between gap-3">
           <div className="text-xs">
             <span className="font-extrabold text-slate-900 dark:text-white block">
@@ -254,7 +339,7 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
               Rastreamento Operacional da Partida
             </span>
             <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
-              Supabase Realtime · Custódia Garantida
+              {isPaymentPending ? 'No Radar · Pagamento Pós-Aceite' : 'Supabase Realtime · Custódia Garantida'}
             </span>
           </div>
 
@@ -262,26 +347,26 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
             {/* Etapa 1: Escalação / Aceite */}
             <div
               className={`p-2.5 rounded-xl border flex items-center gap-2.5 ${
-                !isAwaitingAcceptance
+                !isAwaitingAcceptance && !isPaymentPending
                   ? 'bg-emerald-500/10 border-emerald-500/30'
                   : 'bg-sky-500/10 border-sky-500/30'
               }`}
             >
               <div
                 className={`w-6 h-6 rounded-full font-extrabold text-[11px] flex items-center justify-center shrink-0 ${
-                  !isAwaitingAcceptance
+                  !isAwaitingAcceptance && !isPaymentPending
                     ? 'bg-[#22c55e] text-slate-950'
                     : 'bg-sky-500 text-slate-950'
                 }`}
               >
-                {!isAwaitingAcceptance ? '✓' : '1'}
+                {!isAwaitingAcceptance && !isPaymentPending ? '✓' : '1'}
               </div>
               <div className="min-w-0">
                 <div className="text-[11px] font-bold text-slate-900 dark:text-white">
-                  1. {isAwaitingAcceptance ? 'Aguardando Aceite' : 'Goleiro Escalado'}
+                  1. {isPaymentPending ? (hasCandidates ? 'Aceito (Pagar Custódia)' : 'No Radar (Grátis)') : 'Custódia Confirmada'}
                 </div>
                 <div className="text-[10px] text-emerald-700 dark:text-[#22c55e] truncate">
-                  Custódia R$ {effectiveNetCustody.toFixed(2)} + Casa R$ {effectiveHouseFee.toFixed(2)}
+                  Líq. R$ {effectiveNetCustody.toFixed(2)} + Casa R$ {effectiveHouseFee.toFixed(2)}
                 </div>
               </div>
             </div>

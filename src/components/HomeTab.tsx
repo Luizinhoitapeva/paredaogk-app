@@ -25,7 +25,7 @@ import {
   GkFutshopIcon,
   GkStadiumArenaIcon
 } from './icons';
-import { UserProfile, Goalkeeper, MatchBooking, WeeklyMatchTemplate, ArenaField } from '../types';
+import { UserProfile, Goalkeeper, MatchBooking, MatchGoalkeeperCandidate, WeeklyMatchTemplate, ArenaField } from '../types';
 import { formatCurrency } from '../utils/validations';
 import { classifyGoalkeeperTier, getGoalkeeperNetAndFee, ITAPEVA_PRICING_TIERS } from '../utils/cachePricingAI';
 import {
@@ -62,6 +62,10 @@ interface HomeTabProps {
   recentBooking?: MatchBooking | null;
   onOpenReviewModal?: (booking: MatchBooking) => void;
   onAcceptMatchVacancy?: (match: MatchBooking) => Promise<void> | void;
+  onSelectGoalkeeperForPayment?: (
+    match: MatchBooking,
+    candidate: MatchGoalkeeperCandidate
+  ) => void;
   onTrigger20MinEnRouteAlert?: (match: MatchBooking) => Promise<void> | void;
   onConfirmEnRoute20m?: (match: MatchBooking) => Promise<void> | void;
   onOpenHistory?: () => void;
@@ -100,6 +104,8 @@ const INITIAL_FILTERS: SmartFilterCriteria = {
   arenaQuery: '',
 };
 
+const HOME_FILTERS_STORAGE_KEY = 'paredaogk-home-filters-v1';
+
 export const HomeTab: React.FC<HomeTabProps> = ({
   user,
   matches = [],
@@ -117,6 +123,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   recentBooking,
   onOpenReviewModal,
   onAcceptMatchVacancy,
+  onSelectGoalkeeperForPayment,
   onTrigger20MinEnRouteAlert,
   onConfirmEnRoute20m,
   onOpenHistory,
@@ -130,19 +137,45 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   onTriggerSos,
   onReinviteNextWeek,
 }) => {
-  const [filters, setFilters] = useState<SmartFilterCriteria>(INITIAL_FILTERS);
+  const [filters, setFilters] = useState<SmartFilterCriteria>(() => {
+    if (typeof window === 'undefined') return INITIAL_FILTERS;
+    try {
+      const raw = localStorage.getItem(HOME_FILTERS_STORAGE_KEY);
+      if (!raw) return INITIAL_FILTERS;
+      const parsed = JSON.parse(raw);
+      return { ...INITIAL_FILTERS, ...parsed };
+    } catch {
+      return INITIAL_FILTERS;
+    }
+  });
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
   const [goalkeepers, setGoalkeepers] = useState<Goalkeeper[]>([]);
   const [totalRealInDb, setTotalRealInDb] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
 
-  const highlightedMatch = React.useMemo(() => {
-    if (recentBooking) return recentBooking;
-    return (
-      matches.find((m) => m.status === 'confirmed' || m.status === 'searching') ||
-      matches.find((m) => m.status === 'completed') ||
-      null
-    );
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem(HOME_FILTERS_STORAGE_KEY, JSON.stringify(filters));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [filters]);
+
+  const activeMatchesToDisplay = React.useMemo(() => {
+    const map = new Map<string, MatchBooking>();
+    if (recentBooking) {
+      map.set(recentBooking.id, recentBooking);
+    }
+    matches
+      .filter((m) => m.status === 'searching' || m.status === 'confirmed' || m.status === 'in_progress')
+      .forEach((m) => {
+        if (!map.has(m.id)) map.set(m.id, m);
+      });
+    const list = Array.from(map.values());
+    if (list.length > 0) return list.slice(0, 3);
+    const latestCompleted = matches.find((m) => m.status === 'completed');
+    return latestCompleted ? [latestCompleted] : [];
   }, [recentBooking, matches]);
 
   const approvedArenas = React.useMemo(
@@ -304,21 +337,30 @@ export const HomeTab: React.FC<HomeTabProps> = ({
         </button>
       )}
 
-      {/* Active Match Safety Timeline & SOS Banner */}
-      {highlightedMatch && onUpdateMatchSafetyStatus && onTriggerSos && onReinviteNextWeek && (
-        <MatchSafetySosCard
-          match={highlightedMatch}
-          userRole={user.role}
-          allGoalkeepers={goalkeepers}
-          onOpenReviewModal={onOpenReviewModal}
-          onAcceptMatchVacancy={onAcceptMatchVacancy}
-          onTrigger20MinEnRouteAlert={onTrigger20MinEnRouteAlert}
-          onConfirmEnRoute20m={onConfirmEnRoute20m}
-          onUpdateSafetyStatus={onUpdateMatchSafetyStatus}
-          onTriggerSos={onTriggerSos}
-          onReinviteNextWeek={onReinviteNextWeek}
-        />
-      )}
+      {/* Active Radar & Confirmed Match Cards */}
+      {activeMatchesToDisplay.length > 0 &&
+        onUpdateMatchSafetyStatus &&
+        onTriggerSos &&
+        onReinviteNextWeek && (
+          <div className="space-y-3">
+            {activeMatchesToDisplay.map((activeMatch) => (
+              <MatchSafetySosCard
+                key={activeMatch.id}
+                match={activeMatch}
+                userRole={user.role}
+                allGoalkeepers={goalkeepers}
+                onOpenReviewModal={onOpenReviewModal}
+                onAcceptMatchVacancy={onAcceptMatchVacancy}
+                onSelectGoalkeeperForPayment={onSelectGoalkeeperForPayment}
+                onTrigger20MinEnRouteAlert={onTrigger20MinEnRouteAlert}
+                onConfirmEnRoute20m={onConfirmEnRoute20m}
+                onUpdateSafetyStatus={onUpdateMatchSafetyStatus}
+                onTriggerSos={onTriggerSos}
+                onReinviteNextWeek={onReinviteNextWeek}
+              />
+            ))}
+          </div>
+        )}
 
       {/* Organizer Retention Panel: Pelada Recorrente & Elenco Fixo */}
       {user.role === 'contratante' &&

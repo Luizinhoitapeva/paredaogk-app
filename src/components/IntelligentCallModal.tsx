@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion } from 'motion/react';
 import {
   GkCloseIcon as X,
@@ -11,15 +11,10 @@ import {
   GkFlameIcon as Sparkles,
   GkCoinPixIcon as DollarSign,
   GkMetricsIcon as Award,
-  GkFlameIcon as Zap,
-  GkCheckIcon as Check,
-  GkCopyIcon as Copy,
-  GkQrCodeIcon as QrCode,
-  GkCheckCircleIcon as AlertCircle,
-  GkRefreshIcon as Loader2,
   GkSearchIcon as Search,
   GkProfileIcon as UserIcon,
   GkGloveBallIcon,
+  GkRefreshIcon as RotateCcw,
 } from './icons';
 import {
   ModalityType,
@@ -33,10 +28,8 @@ import {
 } from '../types';
 import { formatCurrency } from '../utils/validations';
 import {
-  broadcastBookingConfirmed,
-  confirmMatchCustodySplit,
   dispatchConvocationNotifications,
-  generateMercadoPagoPixCharge,
+  publishFreeRadarMatchInSupabase,
   queryEligibleGoalkeepersWithinRadius,
 } from '../lib/supabaseClient';
 import { CachePricingAssistant } from './CachePricingAssistant';
@@ -51,15 +44,31 @@ import {
   formatDurationLabel,
 } from '../utils/geoMatchmaking';
 
-interface MercadoPagoPixResponse {
-  id: string;
-  status: string;
-  amount: number;
-  qrCodeText: string;
-  qrCodeBase64: string | null;
-  expiresAt: string;
-  idempotencyKey?: string;
-  provider?: string;
+const CALL_DRAFT_STORAGE_KEY = 'paredaogk-call-draft-v1';
+
+interface CallModalDraft {
+  step: 'configure' | 'published';
+  dateIso: string;
+  startTime: string;
+  durationMinutes: number;
+  arenaSearch: string;
+  arenaName: string;
+  address: string;
+  modality: ModalityType;
+  gameLevel: GameDifficultyLevel;
+  slotsCount: 1 | 2;
+  slotConfigs: MatchGoalkeeperSlot[];
+  pricePerSlot: number;
+  notes: string;
+  createdMatchId: string;
+  publishedMatch?: MatchBooking | null;
+  radiusDispatchResult?: {
+    eligibleCount: number;
+    panelNotifiedCount: number;
+    whatsappSentCount: number;
+    evolutionConfigured: boolean;
+  } | null;
+  updatedAt: string;
 }
 
 interface IntelligentCallModalProps {
@@ -127,6 +136,28 @@ function mapDifficultyToLegacyLevel(
   return 'Competitivo';
 }
 
+function loadSavedCallDraft(): Partial<CallModalDraft> | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(CALL_DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed as Partial<CallModalDraft>;
+  } catch {
+    return null;
+  }
+}
+
+function clearSavedCallDraft() {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(CALL_DRAFT_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
   isOpen,
   onClose,
@@ -137,67 +168,148 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
   prefillArena,
   approvedArenas = [],
   recentMatches = [],
-  onOpenAuth,
 }) => {
-  const [step, setStep] = useState<'configure' | 'scanning' | 'matched' | 'mercadopago_pix'>('configure');
+  const initialDraft = useMemo(() => loadSavedCallDraft(), []);
+
+  const [step, setStep] = useState<'configure' | 'scanning' | 'published'>(() =>
+    initialDraft?.step === 'published' && initialDraft.publishedMatch ? 'published' : 'configure'
+  );
 
   // 1. Data, Início & Duração
-  const [dateIso, setDateIso] = useState<string>(getTodayIsoLocal());
-  const [startTime, setStartTime] = useState<string>('20:00');
-  const [durationMinutes, setDurationMinutes] = useState<number>(90);
+  const [dateIso, setDateIso] = useState<string>(
+    () => initialDraft?.dateIso || getTodayIsoLocal()
+  );
+  const [startTime, setStartTime] = useState<string>(
+    () => initialDraft?.startTime || '20:00'
+  );
+  const [durationMinutes, setDurationMinutes] = useState<number>(
+    () => initialDraft?.durationMinutes || 90
+  );
 
   // 2. Local & Detalhes
-  const [arenaSearch, setArenaSearch] = useState<string>('');
+  const [arenaSearch, setArenaSearch] = useState<string>(
+    () => initialDraft?.arenaSearch || ''
+  );
   const [arenaName, setArenaName] = useState<string>(
-    approvedArenas[0]?.name || 'Araxá Futebol Society e Escolinha'
+    () =>
+      initialDraft?.arenaName ||
+      approvedArenas[0]?.name ||
+      'Araxá Futebol Society e Escolinha'
   );
   const [address, setAddress] = useState<string>(
-    approvedArenas[0]?.address || 'Itapeva - SP'
+    () => initialDraft?.address || approvedArenas[0]?.address || 'Itapeva - SP'
   );
-  const [modality, setModality] = useState<ModalityType>('Society');
+  const [modality, setModality] = useState<ModalityType>(
+    () => initialDraft?.modality || 'Society'
+  );
 
   // 3. Nível do Jogo
-  const [gameLevel, setGameLevel] = useState<GameDifficultyLevel>('Médio');
+  const [gameLevel, setGameLevel] = useState<GameDifficultyLevel>(
+    () => initialDraft?.gameLevel || 'Médio'
+  );
 
   // 4. Vagas de Goleiros (1 ou 2 + Aleatório ou Específico)
-  const [slotsCount, setSlotsCount] = useState<1 | 2>(1);
-  const [slotConfigs, setSlotConfigs] = useState<MatchGoalkeeperSlot[]>([
-    { slotIndex: 1, mode: 'random', status: 'open' },
-  ]);
+  const [slotsCount, setSlotsCount] = useState<1 | 2>(
+    () => (initialDraft?.slotsCount === 2 ? 2 : 1)
+  );
+  const [slotConfigs, setSlotConfigs] = useState<MatchGoalkeeperSlot[]>(() =>
+    Array.isArray(initialDraft?.slotConfigs) && initialDraft.slotConfigs.length > 0
+      ? initialDraft.slotConfigs
+      : [{ slotIndex: 1, mode: 'random', status: 'open' }]
+  );
   const [activeSlotPicker, setActiveSlotPicker] = useState<number | null>(null);
   const [eligibleRadiusGks, setEligibleRadiusGks] = useState<Goalkeeper[]>([]);
   const [isLoadingRadiusGks, setIsLoadingRadiusGks] = useState(false);
   const [gkSearchFilter, setGkSearchFilter] = useState('');
 
-  // 5. Cachê por Vaga & Notas
-  const [pricePerSlot, setPricePerSlot] = useState<number>(25);
-  const [notes, setNotes] = useState(
-    'Camisa do nosso time é azul. Procuramos goleiro pontual e comunicativo.'
+  // 5. Cachê sugerido por vaga & Notas (somente pago após aceite e escolha do goleiro)
+  const [pricePerSlot, setPricePerSlot] = useState<number>(
+    () => initialDraft?.pricePerSlot || 25
+  );
+  const [notes, setNotes] = useState<string>(
+    () =>
+      initialDraft?.notes ??
+      'Camisa do nosso time é azul. Procuramos goleiro pontual e comunicativo.'
   );
   const [showAiPricing, setShowAiPricing] = useState(false);
 
-  // Matchmaking 30km + Dispatch stats
+  // Radar Dispatch State
   const [radiusDispatchResult, setRadiusDispatchResult] = useState<{
     eligibleCount: number;
     panelNotifiedCount: number;
     whatsappSentCount: number;
     evolutionConfigured: boolean;
-  } | null>(null);
-  const [createdMatchId, setCreatedMatchId] = useState<string>('');
+  } | null>(() => initialDraft?.radiusDispatchResult || null);
+  const [createdMatchId, setCreatedMatchId] = useState<string>(
+    () => initialDraft?.createdMatchId || ''
+  );
+  const [publishedMatch, setPublishedMatch] = useState<MatchBooking | null>(
+    () => initialDraft?.publishedMatch || null
+  );
+  const [hasDraftSaved, setHasDraftSaved] = useState<boolean>(() => Boolean(initialDraft));
 
-  // Pagamento Pix Mercado Pago / Custódia
-  const [isGeneratingPix, setIsGeneratingPix] = useState(false);
-  const [mpPixData, setMpPixData] = useState<MercadoPagoPixResponse | null>(null);
-  const [hasCopiedPix, setHasCopiedPix] = useState(false);
-  const [pixError, setPixError] = useState('');
-  const [countdownSeconds, setCountdownSeconds] = useState(900);
-  const [isConfirmingPayment, setIsConfirmingPayment] = useState(false);
+  // Ref para evitar que re-renders de `approvedArenas` ou troca de aba resetem o formulário preenchido
+  const lastAppliedPrefillRef = useRef<string>('');
+
+  // Persistir rascunho automaticamente no localStorage sempre que o usuário alterar qualquer campo
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (step === 'scanning') return;
+    try {
+      const payload: CallModalDraft = {
+        step: step === 'published' ? 'published' : 'configure',
+        dateIso,
+        startTime,
+        durationMinutes,
+        arenaSearch,
+        arenaName,
+        address,
+        modality,
+        gameLevel,
+        slotsCount,
+        slotConfigs,
+        pricePerSlot,
+        notes,
+        createdMatchId,
+        publishedMatch,
+        radiusDispatchResult,
+        updatedAt: new Date().toISOString(),
+      };
+      localStorage.setItem(CALL_DRAFT_STORAGE_KEY, JSON.stringify(payload));
+      setHasDraftSaved(true);
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [
+    step,
+    dateIso,
+    startTime,
+    durationMinutes,
+    arenaSearch,
+    arenaName,
+    address,
+    modality,
+    gameLevel,
+    slotsCount,
+    slotConfigs,
+    pricePerSlot,
+    notes,
+    createdMatchId,
+    publishedMatch,
+    radiusDispatchResult,
+  ]);
 
   // Combinar Locais Recentes das partidas + Arenas Oficiais de Itapeva
   const availableLocations = useMemo(() => {
     const map = new Map<
       string,
-      { id: string; name: string; address: string; modality: ModalityType; source: 'recent' | 'official' }
+      {
+        id: string;
+        name: string;
+        address: string;
+        modality: ModalityType;
+        source: 'recent' | 'official';
+      }
     >();
 
     recentMatches.forEach((m, idx) => {
@@ -235,13 +347,27 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
     );
   }, [recentMatches, approvedArenas, arenaSearch]);
 
-  // Preencher dados iniciais quando abre o modal
+  // Aplicar pré-preenchimento APENAS quando um novo prefill explícito (arena, template ou goleiro) for selecionado
   useEffect(() => {
     if (!isOpen) return;
-    setPixError('');
-    setMpPixData(null);
-    setRadiusDispatchResult(null);
+
+    const prefillKey = prefillArena
+      ? `arena:${prefillArena.id}`
+      : prefillTemplate
+      ? `tpl:${prefillTemplate.id}`
+      : prefillGoalkeeper
+      ? `gk:${prefillGoalkeeper.id}`
+      : '';
+
+    if (!prefillKey || prefillKey === lastAppliedPrefillRef.current) {
+      return;
+    }
+
+    lastAppliedPrefillRef.current = prefillKey;
     setActiveSlotPicker(null);
+    setRadiusDispatchResult(null);
+    setPublishedMatch(null);
+    setStep('configure');
 
     if (prefillArena) {
       setArenaName(prefillArena.name);
@@ -254,7 +380,6 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
       );
       setSlotsCount(1);
       setSlotConfigs([{ slotIndex: 1, mode: 'random', status: 'open' }]);
-      setStep('configure');
     } else if (prefillTemplate) {
       setModality(prefillTemplate.modality);
       setArenaName(prefillTemplate.arenaName);
@@ -272,7 +397,6 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
       if (prefillTemplate.notes) setNotes(prefillTemplate.notes);
       setSlotsCount(1);
       setSlotConfigs([{ slotIndex: 1, mode: 'random', status: 'open' }]);
-      setStep('configure');
     } else if (prefillGoalkeeper) {
       const gkTier = classifyGoalkeeperTier({
         rating: prefillGoalkeeper.rating,
@@ -295,22 +419,8 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
           status: 'open',
         },
       ]);
-      setStep('configure');
-    } else {
-      const defaultArena =
-        approvedArenas.find((a) => a.name.toLowerCase().includes('araxá')) ||
-        approvedArenas[0];
-      if (defaultArena) {
-        setArenaName(defaultArena.name);
-        setAddress(defaultArena.address);
-        setModality(defaultArena.mainModality);
-      }
-      setPricePerSlot(25);
-      setSlotsCount(1);
-      setSlotConfigs([{ slotIndex: 1, mode: 'random', status: 'open' }]);
-      setStep('configure');
     }
-  }, [isOpen, prefillArena, prefillTemplate, prefillGoalkeeper, approvedArenas]);
+  }, [isOpen, prefillArena, prefillTemplate, prefillGoalkeeper]);
 
   // Manter array de slots sincronizado com slotsCount (1 ou 2)
   useEffect(() => {
@@ -325,23 +435,12 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
     });
   }, [slotsCount]);
 
-  // Countdown Pix
-  useEffect(() => {
-    let timer: ReturnType<typeof setInterval>;
-    if (step === 'mercadopago_pix' && countdownSeconds > 0) {
-      timer = setInterval(() => {
-        setCountdownSeconds((prev) => (prev > 0 ? prev - 1 : 0));
-      }, 1000);
-    }
-    return () => clearInterval(timer);
-  }, [step, countdownSeconds]);
-
   // Buscar goleiros elegíveis no raio de 30 km sempre que o modal estiver aberto
   const loadEligibleGoalkeepers30Km = async () => {
     setIsLoadingRadiusGks(true);
     try {
       const res = await queryEligibleGoalkeepersWithinRadius({
-        city: address.toLowerCase().includes('itapeva') ? 'Itapeva - SP' : 'Itapeva - SP',
+        city: 'Itapeva - SP',
         arenaName,
         address,
         modality,
@@ -372,10 +471,28 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
   const totalNetCustody = Number(Math.max(0, totalPrice - totalHouseFee).toFixed(2));
   const netPerSlot = Number((totalNetCustody / slotsCount).toFixed(2));
 
-  const formatCountdown = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  const handleResetDraft = () => {
+    clearSavedCallDraft();
+    lastAppliedPrefillRef.current = '';
+    setDateIso(getTodayIsoLocal());
+    setStartTime('20:00');
+    setDurationMinutes(90);
+    setArenaSearch('');
+    const defaultArena =
+      approvedArenas.find((a) => a.name.toLowerCase().includes('araxá')) || approvedArenas[0];
+    setArenaName(defaultArena?.name || 'Araxá Futebol Society e Escolinha');
+    setAddress(defaultArena?.address || 'Itapeva - SP');
+    setModality(defaultArena?.mainModality || 'Society');
+    setGameLevel('Médio');
+    setSlotsCount(1);
+    setSlotConfigs([{ slotIndex: 1, mode: 'random', status: 'open' }]);
+    setPricePerSlot(25);
+    setNotes('Camisa do nosso time é azul. Procuramos goleiro pontual e comunicativo.');
+    setRadiusDispatchResult(null);
+    setPublishedMatch(null);
+    setCreatedMatchId('');
+    setStep('configure');
+    setHasDraftSaved(false);
   };
 
   const handleSetSlotMode = (slotNum: number, mode: 'random' | 'specific') => {
@@ -427,30 +544,33 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
     setActiveSlotPicker(null);
   };
 
-  const buildMatchDraft = (overrideId?: string, paymentStatus: 'paid' | 'pending' = 'pending'): MatchBooking => {
-    const matchId = overrideId || createdMatchId || `mtch-${Date.now()}`;
-    const assignedNames = slotConfigs
-      .map((s) => s.goalkeeperName)
-      .filter(Boolean) as string[];
-    const hasAllAssigned = slotConfigs.every((s) => Boolean(s.goalkeeperId));
+  const buildFreeRadarMatchDraft = (
+    overrideId: string,
+    notifiedCount: number
+  ): MatchBooking => {
+    const specificNames = slotConfigs
+      .filter((s) => s.mode === 'specific' && s.goalkeeperName)
+      .map((s) => s.goalkeeperName) as string[];
 
     const selectionModes = new Set(slotConfigs.map((s) => s.mode));
     const resolvedSelectionMode: 'random' | 'specific' | 'mixed' =
       selectionModes.size > 1 ? 'mixed' : slotConfigs[0]?.mode || 'random';
 
     return {
-      id: matchId,
+      id: overrideId,
       organizerId: user?.id || 'usr-current',
       organizerName: user?.name || 'Organizador ParedãoGK',
       goalkeeperId: slotConfigs[0]?.goalkeeperId,
       goalkeeperName:
-        assignedNames.length > 0
-          ? assignedNames.join(' & ')
-          : `Aguardando ${slotsCount} Goleiro(s) (Radar 30 km)`,
+        specificNames.length > 0
+          ? `${specificNames.join(' & ')} (Convite Enviado)`
+          : `Aguardando Aceite / No Radar (${slotsCount} vaga${slotsCount > 1 ? 's' : ''})`,
       goalkeeperPhoto: slotConfigs[0]?.goalkeeperPhoto,
       arenaName,
       address,
-      city: address.toLowerCase().includes('itapeva') ? 'Itapeva - SP' : user?.city || 'Itapeva - SP',
+      city: address.toLowerCase().includes('itapeva')
+        ? 'Itapeva - SP'
+        : user?.city || 'Itapeva - SP',
       date: formattedDate,
       dateIso,
       time: timeRange,
@@ -461,17 +581,18 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
       goalkeeperPayout: totalNetCustody,
       pricingTier: getTierByTotalPrice(pricePerSlot).tierCode,
       cashbackEarned: Number((totalPrice * 0.1).toFixed(2)),
-      status: hasAllAssigned ? 'confirmed' : 'searching',
+      status: 'searching',
       competitiveLevel: mapDifficultyToLegacyLevel(gameLevel),
       gameLevel,
       goalkeeperSlotsCount: slotsCount,
       selectionMode: resolvedSelectionMode,
       slots: slotConfigs,
-      operationalStatus: hasAllAssigned ? 'accepted' : 'awaiting_acceptance',
+      candidates: [],
+      operationalStatus: 'awaiting_acceptance',
       radiusKm: 30,
-      notifiedGoalkeepersCount: radiusDispatchResult?.eligibleCount || eligibleRadiusGks.length,
+      notifiedGoalkeepersCount: notifiedCount,
       notes,
-      paymentStatus,
+      paymentStatus: 'pending',
       createdAt: new Date().toISOString(),
       checkin2hConfirmed: false,
       enRoute45mConfirmed: false,
@@ -482,55 +603,30 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
     };
   };
 
-  // Etapa 2: Matchmaking por Raio (30 km) + Notificação Painel / WhatsApp Evolution API
-  const handleStartRadarMatchmaking = async () => {
+  // Publicação 100% GRATUITA no Radar 30 km (SEM bloqueio nem cobrança antecipada)
+  const handlePublishFreeRadarMatch = async () => {
     setStep('scanning');
-    setPixError('');
     const newMatchId = `mtch-${Date.now()}`;
     setCreatedMatchId(newMatchId);
 
     const startedAt = Date.now();
     const candidates30Km = await loadEligibleGoalkeepers30Km();
 
-    // Para vagas configuradas como "Aleatório", tentar pré-parear candidatos elegíveis no raio de 30 km
-    const usedIds = new Set(
-      slotConfigs.map((s) => s.goalkeeperId).filter(Boolean) as string[]
-    );
+    const freeMatch = buildFreeRadarMatchDraft(newMatchId, candidates30Km.length);
 
-    const updatedSlots: MatchGoalkeeperSlot[] = slotConfigs.map((slot) => {
-      if (slot.mode === 'specific' && slot.goalkeeperId) {
-        return slot;
-      }
-      const nextCandidate = candidates30Km.find(
-        (gk) => !usedIds.has(gk.id) && gk.availableToday
-      ) || candidates30Km.find((gk) => !usedIds.has(gk.id));
-
-      if (nextCandidate) {
-        usedIds.add(nextCandidate.id);
-        return {
-          ...slot,
-          mode: 'random',
-          goalkeeperId: nextCandidate.id,
-          goalkeeperName: nextCandidate.name,
-          goalkeeperPhoto: nextCandidate.photo,
-          distanceKm: nextCandidate.distanceKm,
-          status: 'open',
-        };
-      }
-      return { ...slot, mode: 'random', status: 'open' };
+    // 1. Publicar partida no Supabase com status 'searching' e payment_status 'pending' (Grátis)
+    await publishFreeRadarMatchInSupabase({
+      match: freeMatch,
+      organizerUserId: user?.id,
     });
 
-    setSlotConfigs(updatedSlots);
-
-    const selectedIds = updatedSlots
+    // 2. Disparar notificações no painel + WhatsApp (Evolution API) para goleiros no raio de 30 km
+    const selectedIds = slotConfigs
       .map((s) => s.goalkeeperId)
       .filter(Boolean) as string[];
-    const selectionModes = new Set(updatedSlots.map((s) => s.mode));
+    const selectionModes = new Set(slotConfigs.map((s) => s.mode));
     const resolvedMode: 'random' | 'specific' | 'mixed' =
-      selectionModes.size > 1 ? 'mixed' : updatedSlots[0]?.mode || 'random';
-
-    const previewDraft = buildMatchDraft(newMatchId, 'pending');
-    previewDraft.slots = updatedSlots;
+      selectionModes.size > 1 ? 'mixed' : slotConfigs[0]?.mode || 'random';
 
     const dispatchRes = await dispatchConvocationNotifications({
       matchId: newMatchId,
@@ -549,8 +645,13 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
       selectionMode: resolvedMode,
       selectedGoalkeeperIds: selectedIds,
       eligibleGoalkeepers: candidates30Km,
-      bookingPayload: previewDraft,
+      bookingPayload: freeMatch,
     });
+
+    const updatedMatch: MatchBooking = {
+      ...freeMatch,
+      notifiedGoalkeepersCount: dispatchRes.eligibleCount,
+    };
 
     setRadiusDispatchResult({
       eligibleCount: dispatchRes.eligibleCount,
@@ -558,100 +659,26 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
       whatsappSentCount: dispatchRes.whatsappSentCount,
       evolutionConfigured: dispatchRes.evolutionConfigured,
     });
+    setPublishedMatch(updatedMatch);
+
+    // Registrar imediatamente na lista de partidas do app para não perder mesmo se fechar o modal
+    onBookingConfirmed(updatedMatch);
 
     const elapsed = Date.now() - startedAt;
-    const waitMs = Math.max(0, 1000 - elapsed);
+    const waitMs = Math.max(0, 900 - elapsed);
     setTimeout(() => {
-      setStep('matched');
+      setStep('published');
     }, waitMs);
   };
 
-  // Gerar cobrança Pix Mercado Pago respeitando múltiplas vagas e Taxa da Casa (R$ 5,00/vaga)
-  const handleGenerateMercadoPagoPix = async () => {
-    if (!user || user.id === 'usr-guest' || !user.email) {
-      setPixError(
-        'Faça login com sua conta antes de gerar o Pix da convocação para validar seus dados de pagador.'
-      );
-      if (onOpenAuth) onOpenAuth();
-      return;
-    }
-
-    setIsGeneratingPix(true);
-    setPixError('');
-
-    try {
-      const matchId = createdMatchId || `mtch-${Date.now()}`;
-      const gkIds = slotConfigs
-        .map((s) => s.goalkeeperId)
-        .filter(Boolean) as string[];
-      const gkNames = slotConfigs
-        .map((s) => s.goalkeeperName)
-        .filter(Boolean)
-        .join(' & ');
-
-      const data = await generateMercadoPagoPixCharge({
-        amount: totalPrice,
-        userId: user.id,
-        goalkeeperId: gkIds[0],
-        goalkeeperIds: gkIds,
-        slotsCount,
-        goalkeeperName: gkNames || 'Vaga Radar 30km',
-        arenaName,
-        type: 'match_booking',
-        description: `Convocacao ${slotsCount} GK - ${arenaName}`,
-        matchId,
-        customer: {
-          name: user.name,
-          email: user.email,
-          cpf: user.cpf,
-          phone: user.phone,
-        },
-      });
-
-      setMpPixData(data);
-      setCountdownSeconds(900);
-      setStep('mercadopago_pix');
-    } catch (err: any) {
-      setPixError(
-        `${err?.message || 'Erro ao comunicar com a API Pix Mercado Pago.'} Você pode utilizar o saldo da carteira ou confirmar em modo de homologação.`
-      );
-    } finally {
-      setIsGeneratingPix(false);
-    }
-  };
-
-  const handleCopyPixCode = () => {
-    if (!mpPixData?.qrCodeText) return;
-    navigator.clipboard?.writeText(mpPixData.qrCodeText);
-    setHasCopiedPix(true);
-    setTimeout(() => setHasCopiedPix(false), 2200);
-  };
-
-  // Finalizar contratação com separação de custódia e taxa da casa (R$ 5,00/vaga)
-  const handleFinalizeBooking = async (paymentMethod: 'pix' | 'wallet' | 'homologation') => {
-    setIsConfirmingPayment(true);
-    try {
-      const finalBooking = buildMatchDraft(
-        mpPixData?.id || createdMatchId || `mtch-${Date.now()}`,
-        'paid'
-      );
-
-      await confirmMatchCustodySplit({
-        match: finalBooking,
-        payerUserId: user?.id,
-        payerEmail: user?.email,
-        paymentMethod,
-        paymentId: mpPixData?.id,
-      });
-
-      await broadcastBookingConfirmed(finalBooking).catch(() => undefined);
-
-      onBookingConfirmed(finalBooking);
-      onClose();
-      setStep('configure');
-    } finally {
-      setIsConfirmingPayment(false);
-    }
+  const handleFinishAndClose = () => {
+    clearSavedCallDraft();
+    lastAppliedPrefillRef.current = '';
+    setPublishedMatch(null);
+    setRadiusDispatchResult(null);
+    setStep('configure');
+    setHasDraftSaved(false);
+    onClose();
   };
 
   const filteredPickerGks = eligibleRadiusGks.filter((gk) => {
@@ -665,8 +692,6 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
     );
   });
 
-  const canPayWithWallet = Boolean(user && user.walletBalance >= totalPrice);
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 dark:bg-black/85 backdrop-blur-md overflow-y-auto">
       <motion.div
@@ -676,42 +701,52 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
         className="relative w-full max-w-2xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden my-4 transition-colors"
       >
         {/* Top Header */}
-        <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-slate-900/80">
+        <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-slate-900/80 gap-2">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center text-emerald-600 dark:text-[#22c55e] shrink-0">
-              {step === 'mercadopago_pix' ? (
-                <QrCode className="w-5 h-5" />
-              ) : (
-                <GkGloveBallIcon className="w-5 h-5" />
-              )}
+              <GkGloveBallIcon className="w-5 h-5" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="font-display font-extrabold text-base sm:text-lg text-slate-900 dark:text-white tracking-tight">
-                  {step === 'mercadopago_pix'
-                    ? 'Pagamento Pix Mercado Pago'
+                  {step === 'published'
+                    ? 'Convocação Publicada no Radar!'
                     : 'Bora Jogar! · Convocação Inteligente'}
                 </h2>
                 <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-700 dark:text-[#22c55e] border border-emerald-500/30">
-                  {step === 'mercadopago_pix' ? 'Mercado Pago' : 'Raio 30 km'}
+                  {step === 'published' ? 'Aguardando Aceite' : 'Grátis · Raio 30 km'}
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                {step === 'mercadopago_pix'
-                  ? 'Custódia garantida com separação automática da taxa da casa'
-                  : 'Escolha horário, arena, nível do jogo e defina 1 ou 2 vagas de goleiro'}
+                {step === 'published'
+                  ? 'Nenhuma cobrança realizada — pagamento só após escolher o goleiro'
+                  : 'Publique gratuitamente no radar e pague a custódia somente após o aceite'}
               </p>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Fechar modal Bora Jogar"
-            className="w-10 h-10 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {step === 'configure' && hasDraftSaved && (
+              <button
+                type="button"
+                onClick={handleResetDraft}
+                title="Limpar rascunho salvo"
+                className="px-2.5 h-9 rounded-xl bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Limpar</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Minimizar e manter rascunho"
+              title="Fechar (seu rascunho continua salvo)"
+              className="w-10 h-10 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* STEP 1: CONFIGURE ("BORA JOGAR!") */}
@@ -960,7 +995,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
                           </div>
                           <div className="text-[10px] text-slate-500 dark:text-slate-400">
                             {slot.mode === 'specific' && slot.goalkeeperName
-                              ? `Específico selecionado${slot.distanceKm ? ` · ${slot.distanceKm} km` : ''}`
+                              ? `Convite específico${slot.distanceKm ? ` · ${slot.distanceKm} km` : ''}`
                               : 'Notifica todos os goleiros disponíveis no raio de 30 km'}
                           </div>
                         </div>
@@ -1060,12 +1095,12 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
               </div>
             </div>
 
-            {/* Seção 5: Cachê & Separação Custódia / Taxa da Casa */}
+            {/* Seção 5: Cachê Oferecido (Sem cobrança na criação) */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                   <DollarSign className="w-3.5 h-3.5 text-emerald-600 dark:text-[#22c55e]" />
-                  Cachê por Vaga ({slotsCount}× = {formatCurrency(totalPrice)})
+                  Cachê Oferecido por Vaga ({slotsCount}× = {formatCurrency(totalPrice)})
                 </label>
                 <button
                   type="button"
@@ -1130,17 +1165,20 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
                 />
               )}
 
-              {/* Resumo Financeiro Transparente */}
+              {/* Aviso Transparente de Publicação Gratuita */}
               <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                 <span className="text-slate-700 dark:text-slate-200 font-semibold">
-                  Custódia Líquida ({slotsCount} vaga{slotsCount > 1 ? 's' : ''}):{' '}
+                  Custódia após aceite ({slotsCount} vaga{slotsCount > 1 ? 's' : ''}):{' '}
                   <strong className="font-mono text-emerald-700 dark:text-[#22c55e]">
-                    {formatCurrency(totalNetCustody)}
+                    {formatCurrency(totalNetCustody)} GK
+                  </strong>{' '}
+                  +{' '}
+                  <strong className="font-mono text-sky-700 dark:text-[#38bdf8]">
+                    {formatCurrency(totalHouseFee)} casa
                   </strong>
-                  {slotsCount > 1 ? ` (${formatCurrency(netPerSlot)}/GK)` : ''}
                 </span>
-                <span className="font-mono text-sky-700 dark:text-[#38bdf8] font-bold">
-                  Taxa da Casa: {formatCurrency(totalHouseFee)} (R$ 5,00/vaga)
+                <span className="font-mono font-bold text-emerald-700 dark:text-[#22c55e]">
+                  Publicação Gratuita · Pague depois
                 </span>
               </div>
             </div>
@@ -1158,14 +1196,14 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
               />
             </div>
 
-            {/* CTA Bora Jogar */}
+            {/* CTA Gratuita: Convocar / Disparar Radar */}
             <button
               type="button"
-              onClick={handleStartRadarMatchmaking}
+              onClick={handlePublishFreeRadarMatch}
               className="w-full min-h-[52px] rounded-2xl bg-[#22c55e] hover:brightness-110 active:scale-[0.99] text-slate-950 font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/25 transition-all cursor-pointer"
             >
               <Radar className="w-4 h-4" />
-              <span>Bora Jogar! Notificar Goleiros no Raio de 30 km</span>
+              <span>Convocar / Disparar Radar (Grátis)</span>
             </button>
           </div>
         )}
@@ -1183,36 +1221,44 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
 
             <div>
               <h3 className="font-display font-bold text-lg text-slate-900 dark:text-white mb-1">
-                Filtrando Goleiros num Raio de 30 km...
+                Publicando Partida & Notificando Raio de 30 km...
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm mx-auto">
-                Consultando base oficial de Itapeva/região e disparando notificações pelo painel e WhatsApp (Evolution API).
+                Disparando alertas gratuitos para os goleiros elegíveis no painel e via WhatsApp (Evolution API).
               </p>
             </div>
           </div>
         )}
 
-        {/* STEP 3: MATCHED & CUSTODY CHECKOUT */}
-        {step === 'matched' && (
+        {/* STEP 3: PUBLISHED IN RADAR (FREE — NO PAYMENT LOCK) */}
+        {step === 'published' && (
           <div className="p-5 sm:p-6 space-y-4 max-h-[78vh] overflow-y-auto">
-            {/* Dispatch Summary Banner */}
-            <div className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-start gap-3">
-              <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-[#22c55e] shrink-0 mt-0.5" />
-              <div className="text-xs space-y-0.5">
-                <div className="font-extrabold text-emerald-800 dark:text-[#22c55e]">
-                  Convocação Disparada · Raio de 30 km Ativo
+            <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/35 flex items-start gap-3">
+              <CheckCircle2 className="w-6 h-6 text-emerald-600 dark:text-[#22c55e] shrink-0 mt-0.5" />
+              <div className="text-xs space-y-1">
+                <div className="font-extrabold text-sm text-emerald-800 dark:text-[#22c55e]">
+                  Partida Publicada · Aguardando Aceite / No Radar
                 </div>
-                <div className="text-[11px] text-slate-600 dark:text-slate-300">
-                  {radiusDispatchResult?.eligibleCount || 0} goleiro(s) elegíveis localizados ·{' '}
-                  {radiusDispatchResult?.panelNotifiedCount || 0} alerta(s) no painel{' '}
+                <div className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                  {radiusDispatchResult?.eligibleCount || 0} goleiro(s) dentro de 30 km localizados ·{' '}
+                  {radiusDispatchResult?.panelNotifiedCount || 0} notificação(ões) no painel{' '}
                   {radiusDispatchResult?.evolutionConfigured
                     ? `· ${radiusDispatchResult.whatsappSentCount} WhatsApp Evolution enviado(s)`
-                    : '· Pronto para contratação em custódia'}
+                    : '· Radar ativo em tempo real'}
                 </div>
               </div>
             </div>
 
-            {/* Vagas Escaladas */}
+            <div className="p-4 rounded-2xl bg-sky-500/10 border border-sky-500/30 text-xs text-sky-900 dark:text-sky-100 space-y-1">
+              <div className="font-extrabold text-sky-700 dark:text-[#38bdf8]">
+                Nenhuma cobrança foi realizada agora
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                O pagamento (Pix Mercado Pago ou Saldo da Carteira) só aparecerá quando você selecionar o goleiro que aceitou/se candidatou à vaga no painel da partida para efetivar a custódia.
+              </p>
+            </div>
+
+            {/* Resumo das Vagas Publicadas */}
             <div className="space-y-2">
               {slotConfigs.map((slot) => (
                 <div
@@ -1233,7 +1279,9 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
                         {slot.goalkeeperName || 'Aberta no Radar 30 km (Aguardando Aceite)'}
                       </div>
                       <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                        {slot.mode === 'specific' ? 'Goleiro Específico' : 'Matchmaking Aleatório 30 km'}
+                        {slot.mode === 'specific'
+                          ? 'Convite Específico Enviado'
+                          : 'Matchmaking Aleatório 30 km'}
                         {slot.distanceKm ? ` · ${slot.distanceKm} km` : ''}
                       </div>
                     </div>
@@ -1248,7 +1296,7 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
               ))}
             </div>
 
-            {/* Resumo da Partida e Separação Custódia/Taxa */}
+            {/* Resumo da Partida */}
             <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800 text-xs space-y-1.5">
               <div className="flex justify-between">
                 <span className="text-slate-500 dark:text-slate-400">Local:</span>
@@ -1268,172 +1316,22 @@ export const IntelligentCallModal: React.FC<IntelligentCallModalProps> = ({
               </div>
               <div className="pt-2 mt-1 border-t border-slate-200 dark:border-slate-800 flex justify-between">
                 <span className="text-slate-500 dark:text-slate-400">
-                  Taxa Fixa da Casa ({slotsCount} × R$ 5,00):
+                  Valor Combinado ({slotsCount} vaga{slotsCount > 1 ? 's' : ''}):
                 </span>
-                <span className="font-mono font-bold text-sky-600 dark:text-[#38bdf8]">
-                  {formatCurrency(totalHouseFee)}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500 dark:text-slate-400">Custódia Líquida Goleiro(s):</span>
-                <span className="font-mono font-bold text-emerald-600 dark:text-[#22c55e]">
-                  {formatCurrency(totalNetCustody)}
-                </span>
-              </div>
-              <div className="flex justify-between text-sm pt-1">
-                <span className="font-extrabold text-slate-900 dark:text-white">Total Geral:</span>
                 <span className="font-mono font-extrabold text-emerald-600 dark:text-[#22c55e]">
-                  {formatCurrency(totalPrice)}
+                  {formatCurrency(totalPrice)} (Custódia após aceite)
                 </span>
               </div>
             </div>
 
-            {pixError && (
-              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-800 dark:text-amber-200 space-y-2">
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                  <span>{pixError}</span>
-                </div>
-                <button
-                  type="button"
-                  disabled={isConfirmingPayment}
-                  onClick={() => handleFinalizeBooking('homologation')}
-                  className="w-full min-h-[40px] rounded-xl bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-                >
-                  <Check className="w-3.5 h-3.5" />
-                  <span>Confirmar em Homologação & Aplicar Custódia ({formatCurrency(totalPrice)})</span>
-                </button>
-              </div>
-            )}
-
-            {/* Payment Actions */}
-            <div className="space-y-2.5">
-              <button
-                type="button"
-                disabled={isGeneratingPix}
-                onClick={handleGenerateMercadoPagoPix}
-                className="w-full min-h-[48px] rounded-xl bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
-              >
-                {isGeneratingPix ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Gerando Pix Mercado Pago...</span>
-                  </>
-                ) : (
-                  <>
-                    <QrCode className="w-4 h-4" />
-                    <span>Pagar com Pix Mercado Pago ({formatCurrency(totalPrice)})</span>
-                  </>
-                )}
-              </button>
-
-              <div className="flex items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => setStep('configure')}
-                  className="min-h-[44px] px-4 rounded-xl border border-slate-300 dark:border-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
-                >
-                  Editar Jogo
-                </button>
-                <button
-                  type="button"
-                  disabled={isConfirmingPayment}
-                  onClick={() =>
-                    handleFinalizeBooking(canPayWithWallet ? 'wallet' : 'homologation')
-                  }
-                  className="flex-1 min-h-[44px] px-3 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                >
-                  <Zap className="w-3.5 h-3.5 text-sky-600 dark:text-[#38bdf8]" />
-                  <span>
-                    {canPayWithWallet
-                      ? `Usar Saldo da Carteira (${formatCurrency(user?.walletBalance || 0)})`
-                      : `Publicar & Reter Custódia (${formatCurrency(totalPrice)})`}
-                  </span>
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* STEP 4: MERCADO PAGO PIX MODAL */}
-        {step === 'mercadopago_pix' && mpPixData && (
-          <div className="p-6 space-y-4 max-h-[75vh] overflow-y-auto text-center">
-            <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-between text-xs text-emerald-700 dark:text-emerald-300">
-              <span className="flex items-center gap-1.5 font-semibold">
-                <Shield className="w-4 h-4 text-emerald-600 dark:text-[#22c55e]" />
-                Custódia Protegida · {slotsCount} Vaga(s)
-              </span>
-              <span className="font-mono text-emerald-600 dark:text-[#22c55e] font-bold">
-                Expira em {formatCountdown(countdownSeconds)}
-              </span>
-            </div>
-
-            <div>
-              <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
-                Total ({formatCurrency(totalNetCustody)} GK + {formatCurrency(totalHouseFee)} taxa casa):
-              </span>
-              <span className="font-mono tabular-nums text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white">
-                {formatCurrency(mpPixData.amount || totalPrice)}
-              </span>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-white w-52 h-52 mx-auto flex items-center justify-center shadow-2xl border-2 border-slate-200 dark:border-slate-800">
-              {mpPixData.qrCodeBase64 ? (
-                <img
-                  src={mpPixData.qrCodeBase64}
-                  alt="QR Code Pix Mercado Pago"
-                  className="w-full h-full object-contain"
-                />
-              ) : (
-                <div className="text-xs font-mono text-slate-700">Pix Copia e Cola abaixo</div>
-              )}
-            </div>
-
-            <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center justify-between text-left gap-2">
-              <div className="truncate text-slate-600 dark:text-slate-400 text-[11px] font-mono select-all flex-1">
-                {mpPixData.qrCodeText}
-              </div>
-              <button
-                type="button"
-                onClick={handleCopyPixCode}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
-                  hasCopiedPix
-                    ? 'bg-[#22c55e] text-slate-950 font-bold'
-                    : 'bg-slate-200 dark:bg-slate-800 text-emerald-700 dark:text-[#22c55e]'
-                }`}
-              >
-                {hasCopiedPix ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>{hasCopiedPix ? 'Copiado!' : 'Copiar Pix'}</span>
-              </button>
-            </div>
-
-            <div className="flex items-center gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => setStep('matched')}
-                className="min-h-[44px] px-4 rounded-xl border border-slate-300 dark:border-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-400 cursor-pointer"
-              >
-                Voltar
-              </button>
-              <button
-                type="button"
-                disabled={isConfirmingPayment}
-                onClick={() => handleFinalizeBooking('pix')}
-                className="flex-1 min-h-[48px] rounded-xl bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
-              >
-                {isConfirmingPayment ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Liquidando Custódia...</span>
-                  </>
-                ) : (
-                  <>
-                    <Check className="w-4 h-4" />
-                    <span>Confirmar Pagamento & Reter Custódia</span>
-                  </>
-                )}
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={handleFinishAndClose}
+              className="w-full min-h-[50px] rounded-2xl bg-[#22c55e] hover:brightness-110 active:scale-[0.99] text-slate-950 font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/25 transition-all cursor-pointer"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Concluir e Acompanhar no Radar</span>
+            </button>
           </div>
         )}
       </motion.div>

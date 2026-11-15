@@ -17,6 +17,7 @@ import {
   MercadoPagoWebhookEventType,
   MercadoPagoWebhookLog,
   Goalkeeper,
+  MatchGoalkeeperCandidate,
 } from '../types';
 import { evaluateGoalkeeperArenaProximity, normalizeSearchText } from '../utils/arenaProximitySearch';
 import { classifyGoalkeeperTier, getMatchGoalkeeperNetPayout, getTierByTotalPrice, ITAPEVA_HOUSE_FEE } from '../utils/cachePricingAI';
@@ -2514,7 +2515,7 @@ export async function fetchMatchesFromSupabase(userId?: string): Promise<MatchBo
         aiFeedback: row.ai_feedback || undefined,
         reviewedAt: row.reviewed_at || undefined,
         notes: row.notes || undefined,
-        paymentStatus: row.payment_status || 'paid',
+        paymentStatus: row.payment_status || (row.status === 'searching' ? 'pending' : 'paid'),
         createdAt: row.created_at || undefined,
         checkin2hConfirmed: Boolean(row.checkin_2h_confirmed),
         enRoute45mConfirmed: Boolean(row.en_route_45m_confirmed),
@@ -3351,14 +3352,64 @@ export async function confirmMatchCustodySplit(params: {
   };
 }
 
+export async function publishFreeRadarMatchInSupabase(params: {
+  match: MatchBooking;
+  organizerUserId?: string;
+}): Promise<{ success: boolean; matchPersisted: boolean }> {
+  try {
+    const res = await fetch('/api/convocacao/publicar-radar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+
+    const parsed = await safeParseJsonResponse<{
+      success: boolean;
+      matchPersisted?: boolean;
+    }>(res, 'Publicação Gratuita no Radar 30km');
+
+    if (parsed.valid && parsed.data?.success) {
+      return {
+        success: true,
+        matchPersisted: Boolean(parsed.data.matchPersisted),
+      };
+    }
+  } catch (err) {
+    console.warn('[publishFreeRadarMatchInSupabase warning]', err);
+  }
+
+  return { success: true, matchPersisted: false };
+}
+
 export async function acceptMatchVacancyInSupabase(params: {
   match: MatchBooking;
-  goalkeeper: Pick<UserProfile, 'id' | 'name' | 'nickname' | 'avatarUrl'>;
+  goalkeeper: Pick<UserProfile, 'id' | 'name' | 'nickname' | 'avatarUrl' | 'rating' | 'phone'>;
+  distanceKm?: number;
 }): Promise<{ synced: boolean; updatedMatch: MatchBooking }> {
   const nowIso = new Date().toISOString();
   const displayName = params.goalkeeper.nickname
     ? `${params.goalkeeper.name} (${params.goalkeeper.nickname})`
     : params.goalkeeper.name;
+
+  const isAlreadyPaid = params.match.paymentStatus === 'paid';
+
+  const existingCandidates: MatchGoalkeeperCandidate[] = Array.isArray(params.match.candidates)
+    ? params.match.candidates
+    : [];
+  const nextCandidate: MatchGoalkeeperCandidate = {
+    id: params.goalkeeper.id,
+    name: params.goalkeeper.name,
+    nickname: params.goalkeeper.nickname,
+    photo: params.goalkeeper.avatarUrl,
+    rating: params.goalkeeper.rating,
+    distanceKm: params.distanceKm,
+    phone: params.goalkeeper.phone,
+    appliedAt: nowIso,
+  };
+  const dedupedCandidates = [
+    nextCandidate,
+    ...existingCandidates.filter((c) => c.id !== nextCandidate.id),
+  ];
 
   const updatedSlots = (params.match.slots || []).map((slot, idx) =>
     idx === 0 || !slot.goalkeeperId
@@ -3368,7 +3419,7 @@ export async function acceptMatchVacancyInSupabase(params: {
           goalkeeperId: params.goalkeeper.id,
           goalkeeperName: displayName,
           goalkeeperPhoto: params.goalkeeper.avatarUrl,
-          status: 'accepted' as const,
+          status: (isAlreadyPaid ? 'accepted' : 'open') as 'accepted' | 'open',
         }
       : slot
   );
@@ -3376,13 +3427,16 @@ export async function acceptMatchVacancyInSupabase(params: {
   const updatedMatch: MatchBooking = {
     ...params.match,
     goalkeeperId: params.match.goalkeeperId || params.goalkeeper.id,
-    goalkeeperName: params.match.goalkeeperName && !params.match.goalkeeperName.includes('Aguardando')
-      ? params.match.goalkeeperName
-      : displayName,
+    goalkeeperName:
+      params.match.goalkeeperName && !params.match.goalkeeperName.includes('Aguardando')
+        ? params.match.goalkeeperName
+        : displayName,
     goalkeeperPhoto: params.match.goalkeeperPhoto || params.goalkeeper.avatarUrl,
-    status: 'confirmed',
-    operationalStatus: 'accepted',
+    status: isAlreadyPaid ? 'confirmed' : 'searching',
+    paymentStatus: isAlreadyPaid ? 'paid' : 'pending',
+    operationalStatus: isAlreadyPaid ? 'accepted' : 'awaiting_custody_payment',
     acceptedAt: nowIso,
+    candidates: dedupedCandidates,
     slots: updatedSlots.length > 0 ? updatedSlots : params.match.slots,
   };
 
@@ -3401,7 +3455,7 @@ export async function acceptMatchVacancyInSupabase(params: {
       const { error } = await supabase
         .from('matches')
         .update({
-          status: 'confirmed',
+          status: updatedMatch.status,
           goalkeeper_id: updatedMatch.goalkeeperId,
           goalkeeper_name: updatedMatch.goalkeeperName,
         })
@@ -3413,8 +3467,12 @@ export async function acceptMatchVacancyInSupabase(params: {
             id: `notif-acc-${Date.now()}`,
             user_id: params.match.organizerId,
             category: 'match',
-            title: `🧤 ${displayName} aceitou a partida!`,
-            description: `Sua convocação em ${params.match.arenaName} (${params.match.date} · ${params.match.time}) foi aceita pelo goleiro.`,
+            title: isAlreadyPaid
+              ? `🧤 ${displayName} aceitou a partida!`
+              : `🧤 ${displayName} se candidatou / aceitou a vaga!`,
+            description: isAlreadyPaid
+              ? `Sua convocação em ${params.match.arenaName} (${params.match.date} · ${params.match.time}) foi aceita pelo goleiro.`
+              : `${displayName} aceitou a chamada em ${params.match.arenaName} (${params.match.date} · ${params.match.time}). Selecione o goleiro no painel para pagar a custódia.`,
             read: false,
             created_at: nowIso,
           },
