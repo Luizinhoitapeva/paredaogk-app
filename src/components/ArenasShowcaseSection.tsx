@@ -82,7 +82,9 @@ export const ArenasShowcaseSection: React.FC<ArenasShowcaseSectionProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                Quadras verificadas para convocação instantânea em Itapeva — cadastre novos campos ou gerencie a moderação
+                {isAdminAuthorized
+                  ? 'Quadras verificadas para convocação instantânea em Itapeva — cadastre novos campos ou gerencie a moderação'
+                  : 'Quadras verificadas para convocação instantânea em Itapeva — cadastre novos campos parceiros'}
               </p>
             </div>
           </div>
@@ -97,24 +99,26 @@ export const ArenasShowcaseSection: React.FC<ArenasShowcaseSectionProps> = ({
               <span>Cadastrar Nova Arena / Campo</span>
             </button>
 
-            <button
-              type="button"
-              onClick={onOpenModeration}
-              className={`px-3.5 py-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 touch-manipulation ${
-                pendingCount > 0 && isAdminAuthorized
-                  ? 'bg-[#38bdf8]/15 hover:bg-[#38bdf8]/25 border-[#38bdf8]/50 text-sky-700 dark:text-[#38bdf8]'
-                  : 'bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
-              }`}
-              title="Painel de Moderação do Administrador"
-            >
-              <AdminShield className="w-4 h-4 text-sky-600 dark:text-[#38bdf8]" />
-              <span>Moderação Admin</span>
-              {pendingCount > 0 && (
-                <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-slate-950 font-mono text-[10px] font-extrabold leading-none">
-                  {pendingCount}
-                </span>
-              )}
-            </button>
+            {isAdminAuthorized && (
+              <button
+                type="button"
+                onClick={onOpenModeration}
+                className={`px-3.5 py-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 touch-manipulation ${
+                  pendingCount > 0
+                    ? 'bg-[#38bdf8]/15 hover:bg-[#38bdf8]/25 border-[#38bdf8]/50 text-sky-700 dark:text-[#38bdf8]'
+                    : 'bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                }`}
+                title="Painel de Moderação do Administrador"
+              >
+                <AdminShield className="w-4 h-4 text-sky-600 dark:text-[#38bdf8]" />
+                <span>Moderação Admin</span>
+                {pendingCount > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-slate-950 font-mono text-[10px] font-extrabold leading-none">
+                    {pendingCount}
+                  </span>
+                )}
+              </button>
+            )}
           </div>
         </div>
 

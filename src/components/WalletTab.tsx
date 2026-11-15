@@ -303,7 +303,7 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                 <span>Adicionar Saldo</span>
               </button>
 
-              {onOpenAdminFinancial && isAuthorizedAdmin(user.email) && (
+              {onOpenAdminFinancial && isAuthorizedAdmin(user) && (
                 <button
                   type="button"
                   onClick={onOpenAdminFinancial}

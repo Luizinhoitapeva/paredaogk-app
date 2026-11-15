@@ -1335,14 +1335,72 @@ export async function savePostMatchAiFeedbackToSupabase(params: {
 // 8. ARENAS OFICIAIS DE ITAPEVA & MODERAÇÃO ADMIN
 // ==========================================
 
+export const OFFICIAL_ADMIN_EMAIL = 'luizinhoitapevasp@gmail.com';
+
 export const ADMIN_EMAILS = [
-  'luizinhoitapevasp@gmail.com',
-  'paredaogkbr@gmail.com',
+  OFFICIAL_ADMIN_EMAIL,
 ];
 
-export function isAuthorizedAdmin(email?: string | null): boolean {
-  if (!email) return false;
-  return ADMIN_EMAILS.includes(email.trim().toLowerCase());
+export interface AdminCheckSubject {
+  id?: string;
+  email?: string | null;
+  role?: string | null;
+  supabaseRole?: string | null;
+  isAdmin?: boolean | null;
+}
+
+export function isAuthorizedAdmin(subject?: string | AdminCheckSubject | null): boolean {
+  if (!subject) return false;
+
+  if (typeof subject === 'string') {
+    return subject.trim().toLowerCase() === OFFICIAL_ADMIN_EMAIL;
+  }
+
+  const normalizedEmail = (subject.email || '').trim().toLowerCase();
+  if (normalizedEmail === OFFICIAL_ADMIN_EMAIL) {
+    return true;
+  }
+
+  const normalizedSupabaseRole = (subject.supabaseRole || '').trim().toLowerCase();
+  const normalizedRole = (subject.role || '').trim().toLowerCase();
+
+  return Boolean(
+    subject.isAdmin === true ||
+      normalizedSupabaseRole === 'admin' ||
+      normalizedRole === 'admin'
+  );
+}
+
+/**
+ * Valida acesso administrativo diretamente no perfil do Supabase (e-mail oficial ou role === 'admin')
+ */
+export async function verifySupabaseAdminAccess(
+  subject?: AdminCheckSubject | null
+): Promise<boolean> {
+  if (!subject) return false;
+  if (!isAuthorizedAdmin(subject)) return false;
+
+  if (!isSupabaseConfigured || !subject.id || subject.id === 'usr-guest') {
+    return isAuthorizedAdmin(subject);
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('email, role')
+      .eq('id', subject.id)
+      .maybeSingle();
+
+    if (error || !data) {
+      return isAuthorizedAdmin(subject);
+    }
+
+    const dbEmail = String(data.email || '').trim().toLowerCase();
+    const dbRole = String(data.role || '').trim().toLowerCase();
+    return dbEmail === OFFICIAL_ADMIN_EMAIL || dbRole === 'admin';
+  } catch {
+    return isAuthorizedAdmin(subject);
+  }
 }
 
 function mapArenaRowToModel(row: any): ArenaField {

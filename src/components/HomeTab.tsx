@@ -314,12 +314,16 @@ export const HomeTab: React.FC<HomeTabProps> = ({
         <ArenasShowcaseSection
           arenas={arenas}
           userEmail={user.email}
-          isAdminAuthorized={isAuthorizedAdmin(user.email)}
+          isAdminAuthorized={isAuthorizedAdmin(user)}
           onConvokeAtArena={(arena) =>
             onConvokeAtArena ? onConvokeAtArena(arena) : onOpenIntelligentCall()
           }
           onOpenSubmitArena={() => onOpenSubmitArena?.()}
-          onOpenModeration={() => onOpenArenaModeration?.()}
+          onOpenModeration={() => {
+            if (isAuthorizedAdmin(user)) {
+              onOpenArenaModeration?.();
+            }
+          }}
         />
       )}
 

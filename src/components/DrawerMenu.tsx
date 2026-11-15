@@ -26,6 +26,7 @@ import {
 import { UserProfile } from '../types';
 import { maskCPF, formatCurrency } from '../utils/validations';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { isAuthorizedAdmin } from '../lib/supabaseClient';
 
 interface DrawerMenuProps {
   isOpen: boolean;
@@ -73,6 +74,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
   onLogout,
 }) => {
   const { isInstallable, install } = usePWAInstall();
+  const isAdminUser = isAuthorizedAdmin(user);
 
   if (!isOpen) return null;
 
@@ -299,7 +301,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
               </button>
             )}
 
-            {onOpenArenaModeration && (
+            {isAdminUser && onOpenArenaModeration && (
               <button
                 onClick={() => { onOpenArenaModeration(); onClose(); }}
                 className="w-full flex items-center justify-between p-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/60 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
@@ -320,7 +322,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
               </button>
             )}
 
-            {onOpenAdminFinancial && (
+            {isAdminUser && onOpenAdminFinancial && (
               <button
                 onClick={() => { onOpenAdminFinancial(); onClose(); }}
                 className="w-full flex items-center justify-between p-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/60 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"

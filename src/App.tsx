@@ -17,6 +17,7 @@ import {
   seedAndFetchArenasFromSupabase,
   fetchMatchesFromSupabase,
   fetchAdminPixWithdrawalsFromSupabase,
+  isAuthorizedAdmin,
 } from './lib/supabaseClient';
 import { OnboardingCarousel } from './components/OnboardingCarousel';
 import { AuthModal } from './components/AuthModal';
@@ -41,6 +42,7 @@ import { CorporatePdfReportModal } from './components/CorporatePdfReportModal';
 import { ArenaSubmissionModal } from './components/ArenaSubmissionModal';
 import { ArenaModerationModal } from './components/ArenaModerationModal';
 import { AdminFinancialModal } from './components/AdminFinancialModal';
+import { detectRequestedAdminRoute } from './components/AdminRouteGuard';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PerformanceStats, ReportScope } from './utils/pdfReportGenerator';
 import {
@@ -107,6 +109,9 @@ export default function App() {
   const [isArenaModerationOpen, setIsArenaModerationOpen] = useState(false);
   const [isAdminFinancialOpen, setIsAdminFinancialOpen] = useState(false);
   const [pendingWithdrawalsCount, setPendingWithdrawalsCount] = useState(0);
+  const [isAuthSessionResolved, setIsAuthSessionResolved] = useState(false);
+  const [securityAlertBanner, setSecurityAlertBanner] = useState<string | null>(null);
+  const isAdminUser = isAuthorizedAdmin(currentUser);
   const [pdfReportModal, setPdfReportModal] = useState<{
     isOpen: boolean;
     scope: ReportScope;
@@ -180,12 +185,18 @@ export default function App() {
 
     // 1. Limpar preventivamente resíduos legados de teste e carregar dados do armazenamento seguro offline
     clearLegacyTestCache().finally(() => {
-      getOfflineUserProfile().then((cachedProfile) => {
-        if (cachedProfile) {
-          setCurrentUser(cachedProfile);
-          setHasCompletedOnboarding(true);
-        }
-      });
+      getOfflineUserProfile()
+        .then((cachedProfile) => {
+          if (cachedProfile) {
+            setCurrentUser(cachedProfile);
+            setHasCompletedOnboarding(true);
+          }
+        })
+        .finally(() => {
+          if (!isSupabaseConfigured) {
+            setIsAuthSessionResolved(true);
+          }
+        });
 
       getOfflineMatches().then((cachedMatches) => {
         if (cachedMatches && cachedMatches.length > 0) {
@@ -197,37 +208,58 @@ export default function App() {
     if (!isSupabaseConfigured) return;
 
     // Verificar se já existe uma sessão ativa
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', session.user.id)
-          .maybeSingle()
-          .then(({ data: profile }) => {
-            if (profile) {
-              setCurrentUser((prev) => ({
-                ...prev,
-                id: profile.id,
-                name: profile.name || prev.name,
-                nickname: profile.nickname || prev.nickname,
-                email: profile.email || session.user.email || prev.email,
-                cpf: profile.cpf || prev.cpf,
-                phone: profile.phone || prev.phone,
-                avatarUrl: profile.avatar_url || prev.avatarUrl,
-                role: (profile.role as UserRole) || prev.role,
-                walletBalance: Number(profile.wallet_balance || 0),
-                cashbackBalance: Number(profile.cashback_balance || 0),
-                matchesPlayed: profile.matches_played || 0,
-                cleanSheets: profile.clean_sheets || 0,
-                penaltiesSaved: profile.penalties_saved || 0,
-                mvpCount: profile.mvp_count || 0,
-              }));
-              setHasCompletedOnboarding(true);
-            }
-          });
-      }
-    });
+    supabase.auth
+      .getSession()
+      .then(async ({ data: { session } }) => {
+        if (session?.user) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', session.user.id)
+            .maybeSingle();
+
+          if (profile) {
+            const rawSupabaseRole = String(profile.role || '');
+            const hasAdminFlag =
+              rawSupabaseRole.trim().toLowerCase() === 'admin' ||
+              Boolean(profile.is_admin);
+            setCurrentUser((prev) => ({
+              ...prev,
+              id: profile.id,
+              name: profile.name || prev.name,
+              nickname: profile.nickname || prev.nickname,
+              email: profile.email || session.user.email || prev.email,
+              cpf: profile.cpf || prev.cpf,
+              phone: profile.phone || prev.phone,
+              avatarUrl: profile.avatar_url || prev.avatarUrl,
+              role:
+                rawSupabaseRole === 'goleiro'
+                  ? 'goleiro'
+                  : rawSupabaseRole === 'contratante'
+                  ? 'contratante'
+                  : prev.role,
+              supabaseRole: rawSupabaseRole || undefined,
+              isAdmin: hasAdminFlag,
+              walletBalance: Number(profile.wallet_balance || 0),
+              cashbackBalance: Number(profile.cashback_balance || 0),
+              matchesPlayed: profile.matches_played || 0,
+              cleanSheets: profile.clean_sheets || 0,
+              penaltiesSaved: profile.penalties_saved || 0,
+              mvpCount: profile.mvp_count || 0,
+            }));
+            setHasCompletedOnboarding(true);
+          } else if (session.user.email) {
+            setCurrentUser((prev) => ({
+              ...prev,
+              id: session.user.id,
+              email: session.user.email || prev.email,
+            }));
+          }
+        }
+      })
+      .finally(() => {
+        setIsAuthSessionResolved(true);
+      });
 
     // Ouvir alterações de estado de autenticação (login/logout/confirmação via token)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -239,6 +271,10 @@ export default function App() {
           .maybeSingle()
           .then(({ data: profile }) => {
             if (profile) {
+              const rawSupabaseRole = String(profile.role || '');
+              const hasAdminFlag =
+                rawSupabaseRole.trim().toLowerCase() === 'admin' ||
+                Boolean(profile.is_admin);
               setCurrentUser((prev) => ({
                 ...prev,
                 id: profile.id,
@@ -248,7 +284,14 @@ export default function App() {
                 cpf: profile.cpf || prev.cpf,
                 phone: profile.phone || prev.phone,
                 avatarUrl: profile.avatar_url || prev.avatarUrl,
-                role: (profile.role as UserRole) || prev.role,
+                role:
+                  rawSupabaseRole === 'goleiro'
+                    ? 'goleiro'
+                    : rawSupabaseRole === 'contratante'
+                    ? 'contratante'
+                    : prev.role,
+                supabaseRole: rawSupabaseRole || undefined,
+                isAdmin: hasAdminFlag,
                 walletBalance: Number(profile.wallet_balance || 0),
                 cashbackBalance: Number(profile.cashback_balance || 0),
               }));
@@ -258,6 +301,8 @@ export default function App() {
           });
       } else if (event === 'SIGNED_OUT') {
         setCurrentUser(INITIAL_USER);
+        setIsArenaModerationOpen(false);
+        setIsAdminFinancialOpen(false);
       }
     });
 
@@ -312,11 +357,77 @@ export default function App() {
         }
       }
     );
+  }, []);
 
+  useEffect(() => {
+    if (!isAdminUser) {
+      setPendingWithdrawalsCount(0);
+      return;
+    }
     fetchAdminPixWithdrawalsFromSupabase().then(({ withdrawals }) => {
       setPendingWithdrawalsCount(withdrawals.filter((w) => w.status === 'pending').length);
     });
-  }, []);
+  }, [isAdminUser]);
+
+  const handleUnauthorizedAdminRedirect = (reason?: string) => {
+    setIsArenaModerationOpen(false);
+    setIsAdminFinancialOpen(false);
+    setHasCompletedOnboarding(true);
+    setCurrentTab('home');
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', '/');
+    }
+    setSecurityAlertBanner(
+      reason ||
+        'Acesso bloqueado: área restrita exclusivamente ao administrador oficial do ParedãoGK (luizinhoitapevasp@gmail.com) ou perfil com role admin no Supabase. Você foi redirecionado para a página inicial.'
+    );
+  };
+
+  // Guarda de Rotas Administrativas (URL direta, hash, query string e estado dos modais)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !isAuthSessionResolved) return;
+
+    const evaluateAdminRouteGuard = () => {
+      const requestedAdminRoute = detectRequestedAdminRoute(
+        window.location.pathname,
+        window.location.hash,
+        window.location.search
+      );
+
+      if (requestedAdminRoute) {
+        if (isAdminUser) {
+          setHasCompletedOnboarding(true);
+          if (requestedAdminRoute === 'arenas') {
+            setIsArenaModerationOpen(true);
+          } else {
+            setIsAdminFinancialOpen(true);
+          }
+          window.history.replaceState(null, '', '/');
+        } else {
+          handleUnauthorizedAdminRedirect(
+            'Acesso bloqueado: esta rota administrativa é exclusiva do administrador oficial do ParedãoGK. Você foi redirecionado para a página inicial.'
+          );
+        }
+      }
+    };
+
+    evaluateAdminRouteGuard();
+
+    window.addEventListener('popstate', evaluateAdminRouteGuard);
+    window.addEventListener('hashchange', evaluateAdminRouteGuard);
+    return () => {
+      window.removeEventListener('popstate', evaluateAdminRouteGuard);
+      window.removeEventListener('hashchange', evaluateAdminRouteGuard);
+    };
+  }, [isAuthSessionResolved, isAdminUser]);
+
+  // Bloqueio defensivo caso modais admin sejam acionados sem permissão
+  useEffect(() => {
+    if (!isAuthSessionResolved) return;
+    if (!isAdminUser && (isArenaModerationOpen || isAdminFinancialOpen)) {
+      handleUnauthorizedAdminRedirect();
+    }
+  }, [isAuthSessionResolved, isAdminUser, isArenaModerationOpen, isAdminFinancialOpen]);
 
   useEffect(() => {
     if (arenas.length > 0) {
@@ -846,6 +957,35 @@ export default function App() {
         onOpenWhatsApp={handleOpenWhatsApp}
       />
 
+      {/* Security Access Denied Banner */}
+      {securityAlertBanner && (
+        <div className="max-w-6xl w-full mx-auto px-4 sm:px-6 pt-4">
+          <div
+            role="alert"
+            className="p-4 rounded-2xl bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-500/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-red-800 dark:text-red-200 shadow-lg shadow-red-500/10"
+          >
+            <div className="flex items-start sm:items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-red-500/20 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0 font-extrabold">
+                !
+              </div>
+              <div>
+                <span className="font-bold text-red-900 dark:text-white block">
+                  Acesso Administrativo Restrito
+                </span>
+                <span className="text-red-700 dark:text-red-300">{securityAlertBanner}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSecurityAlertBanner(null)}
+              className="px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-800 dark:text-red-200 font-semibold cursor-pointer transition-colors self-end sm:self-center shrink-0"
+            >
+              Entendi
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Confirmation Success Banner */}
       {confirmationBanner && (
         <div className="max-w-6xl w-full mx-auto px-4 sm:px-6 pt-4">
@@ -887,7 +1027,7 @@ export default function App() {
             }}
             onConvokeAtArena={handleConvokeAtArena}
             onOpenSubmitArena={() => setIsArenaSubmissionOpen(true)}
-            onOpenArenaModeration={() => setIsArenaModerationOpen(true)}
+            onOpenArenaModeration={isAdminUser ? () => setIsArenaModerationOpen(true) : undefined}
             onSelectGoalkeeper={handleSelectGoalkeeper}
             onOpenWhatsApp={handleOpenWhatsApp}
             onOpenFutshop={() => setIsFutshopModalOpen(true)}
@@ -950,7 +1090,7 @@ export default function App() {
             theme={theme}
             onUpdateBalance={handleUpdateBalance}
             onOpenProfilePricing={() => setIsProfilePricingModalOpen(true)}
-            onOpenAdminFinancial={() => setIsAdminFinancialOpen(true)}
+            onOpenAdminFinancial={isAdminUser ? () => setIsAdminFinancialOpen(true) : undefined}
             onOpenPdfReport={({ scope, walletSummary, transactions }) =>
               setPdfReportModal({
                 isOpen: true,
@@ -994,10 +1134,10 @@ export default function App() {
           })
         }
         onOpenSubmitArena={() => setIsArenaSubmissionOpen(true)}
-        onOpenArenaModeration={() => setIsArenaModerationOpen(true)}
-        pendingArenasCount={arenas.filter((a) => a.status === 'pending').length}
-        onOpenAdminFinancial={() => setIsAdminFinancialOpen(true)}
-        pendingWithdrawalsCount={pendingWithdrawalsCount}
+        onOpenArenaModeration={isAdminUser ? () => setIsArenaModerationOpen(true) : undefined}
+        pendingArenasCount={isAdminUser ? arenas.filter((a) => a.status === 'pending').length : 0}
+        onOpenAdminFinancial={isAdminUser ? () => setIsAdminFinancialOpen(true) : undefined}
+        pendingWithdrawalsCount={isAdminUser ? pendingWithdrawalsCount : 0}
         onOpenHistory={() => setIsHistoryModalOpen(true)}
         onOpenFutshop={() => setIsFutshopModalOpen(true)}
         onOpenHelp={() => setIsHelpModalOpen(true)}
@@ -1040,6 +1180,7 @@ export default function App() {
         user={currentUser}
         arenas={arenas}
         onArenaModerated={handleArenaModerated}
+        onUnauthorizedRedirect={handleUnauthorizedAdminRedirect}
       />
 
       {/* Restricted Admin Financial Console (Saques Pix CajuPay & Webhooks HMAC-SHA256) */}
@@ -1048,6 +1189,7 @@ export default function App() {
         onClose={() => setIsAdminFinancialOpen(false)}
         user={currentUser}
         onWithdrawalsCountChange={(count) => setPendingWithdrawalsCount(count)}
+        onUnauthorizedRedirect={handleUnauthorizedAdminRedirect}
       />
 
       {/* Intelligent GK Radar Matchmaking Modal */}

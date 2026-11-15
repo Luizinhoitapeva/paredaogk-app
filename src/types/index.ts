@@ -33,6 +33,8 @@ export interface UserProfile {
   pricingTier?: PricingTierCode;
   tierPinned?: boolean;
   isEliteMember: boolean;
+  supabaseRole?: string;
+  isAdmin?: boolean;
   createdAt: string;
 }
 

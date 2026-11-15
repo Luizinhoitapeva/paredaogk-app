@@ -161,6 +161,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           }
 
           if (profileData) {
+            const rawSupabaseRole = String(profileData.role || '');
+            const hasAdminFlag =
+              rawSupabaseRole.trim().toLowerCase() === 'admin' ||
+              Boolean(profileData.is_admin);
             loggedUser = {
               id: profileData.id,
               name: profileData.name || authData.user?.user_metadata?.name || 'Atleta ParedãoGK',
@@ -171,7 +175,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               phone: profileData.phone || '',
               birthDate: profileData.birth_date || '',
               age: profileData.age || 18,
-              role: (profileData.role as UserRole) || role,
+              role: rawSupabaseRole === 'goleiro' ? 'goleiro' : role === 'goleiro' ? 'goleiro' : 'contratante',
+              supabaseRole: rawSupabaseRole || undefined,
+              isAdmin: hasAdminFlag,
               avatarUrl: profileData.avatar_url || '',
               rating: Number(profileData.rating || 5.0),
               matchesPlayed: Number(profileData.matches_played || 0),

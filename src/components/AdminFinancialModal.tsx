@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   GkCloseIcon as X,
-  GkShieldCheckAdminIcon as AdminShield,
   GkBankTransferIcon as BankTransfer,
   GkWebhookIcon as Webhook,
   GkKeyLockIcon as KeyLock,
@@ -35,15 +34,15 @@ import {
   subscribeToAdminFinancialRealtime,
 } from '../lib/supabaseClient';
 import { Skeleton } from './SkeletonLoading';
+import { AdminRouteGuard } from './AdminRouteGuard';
 
 interface AdminFinancialModalProps {
   isOpen: boolean;
   onClose: () => void;
   user: UserProfile;
   onWithdrawalsCountChange?: (pendingCount: number) => void;
+  onUnauthorizedRedirect?: (reason: string) => void;
 }
-
-const ADMIN_PASSCODE = 'PGK-ITAPEVA';
 
 const WEBHOOK_EVENT_OPTIONS: {
   id: CajuPayWebhookEventType;
@@ -77,11 +76,9 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
   onClose,
   user,
   onWithdrawalsCountChange,
+  onUnauthorizedRedirect,
 }) => {
   const [activeTab, setActiveTab] = useState<'withdrawals' | 'webhooks'>('withdrawals');
-  const [adminUnlockedByKey, setAdminUnlockedByKey] = useState(false);
-  const [passcodeInput, setPasscodeInput] = useState('');
-  const [passcodeError, setPasscodeError] = useState('');
 
   // Withdrawals state
   const [withdrawals, setWithdrawals] = useState<AdminPixWithdrawal[]>([]);
@@ -125,7 +122,7 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
   const [simulateInvalidSig, setSimulateInvalidSig] = useState(false);
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
 
-  const hasAdminAccess = isAuthorizedAdmin(user.email) || adminUnlockedByKey;
+  const hasAdminAccess = isAuthorizedAdmin(user);
 
   const loadWithdrawals = async () => {
     setIsLoadingWithdrawals(true);
@@ -206,17 +203,6 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
   }, [withdrawals, statusFilter, searchQuery]);
 
   if (!isOpen) return null;
-
-  const handleUnlockAdmin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (passcodeInput.trim().toUpperCase() === ADMIN_PASSCODE) {
-      setAdminUnlockedByKey(true);
-      setPasscodeError('');
-      setPasscodeInput('');
-    } else {
-      setPasscodeError('Chave administrativa inválida. Acesso restrito ao administrador.');
-    }
-  };
 
   const handleCopyText = (id: string, value: string) => {
     navigator.clipboard?.writeText(value);
@@ -331,85 +317,55 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
   };
 
   return (
-    <AnimatePresence>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-950/80 dark:bg-black/90 backdrop-blur-sm">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.97, y: 10 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.97, y: 10 }}
-          transition={{ duration: 0.18 }}
-          className="relative w-full max-w-5xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl flex flex-col max-h-[94vh] overflow-hidden"
-        >
-          {/* Modal Header */}
-          <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/90 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="w-10 h-10 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center text-emerald-600 dark:text-[#22c55e] shrink-0">
-                <BankTransfer className="w-5 h-5" />
-              </div>
-              <div className="min-w-0">
-                <h2 className="font-display font-extrabold text-base sm:text-lg text-slate-900 dark:text-white truncate">
-                  Gestão Financeira CajuPay
-                </h2>
-                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                  <span>Administração de Saques Pix & Webhooks</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono text-[11px] text-sky-600 dark:text-[#38bdf8]">
-                    {user.email || 'Admin'}
-                  </span>
+    <AdminRouteGuard
+      user={user}
+      isOpen={isOpen}
+      onUnauthorized={(reason) => {
+        onClose();
+        onUnauthorizedRedirect?.(reason);
+      }}
+    >
+      <AnimatePresence>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-950/80 dark:bg-black/90 backdrop-blur-sm">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.97, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.97, y: 10 }}
+            transition={{ duration: 0.18 }}
+            className="relative w-full max-w-5xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl flex flex-col max-h-[94vh] overflow-hidden"
+          >
+            {/* Modal Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/90 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center text-emerald-600 dark:text-[#22c55e] shrink-0">
+                  <BankTransfer className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="font-display font-extrabold text-base sm:text-lg text-slate-900 dark:text-white truncate">
+                    Gestão Financeira CajuPay
+                  </h2>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                    <span>Administração de Saques Pix & Webhooks</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono text-[11px] text-sky-600 dark:text-[#38bdf8]">
+                      {user.email || 'Admin'}
+                    </span>
+                  </div>
                 </div>
               </div>
+
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Fechar painel financeiro administrativo"
+                className="w-10 h-10 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white flex items-center justify-center cursor-pointer transition-colors shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Fechar painel financeiro administrativo"
-              className="w-10 h-10 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white flex items-center justify-center cursor-pointer transition-colors shrink-0"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          {!hasAdminAccess ? (
-            <div className="p-6 sm:p-10 space-y-5 overflow-y-auto text-center max-w-md mx-auto">
-              <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-500 mx-auto">
-                <AdminShield className="w-7 h-7" />
-              </div>
-              <div className="space-y-1.5">
-                <h3 className="font-display font-extrabold text-base text-slate-900 dark:text-white">
-                  Acesso Restrito ao Administrador
-                </h3>
-                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                  A liberação de saques Pix e o gerenciamento de chaves HMAC-SHA256 da CajuPay são restritos à administração oficial do ParedãoGK.
-                </p>
-              </div>
-
-              <form onSubmit={handleUnlockAdmin} className="space-y-3 text-left">
-                <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400">
-                  Chave de Liberação Administrativa:
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="password"
-                    value={passcodeInput}
-                    onChange={(e) => setPasscodeInput(e.target.value)}
-                    placeholder="Digite a chave admin"
-                    className="flex-1 h-11 px-3.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-white focus:border-[#38bdf8] focus:outline-none"
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 h-11 rounded-xl bg-[#38bdf8] hover:bg-sky-400 text-slate-950 font-bold text-xs cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    Desbloquear
-                  </button>
-                </div>
-                {passcodeError && (
-                  <p className="text-[11px] text-red-500 font-medium">{passcodeError}</p>
-                )}
-              </form>
-            </div>
-          ) : (
-            <>
+            {hasAdminAccess && (
+              <>
               {/* Top Module Navigation Tabs */}
               <div className="px-4 sm:px-6 pt-3 pb-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-[#020617] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center p-1 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 gap-1 self-start">
@@ -1209,5 +1165,6 @@ export const AdminFinancialModal: React.FC<AdminFinancialModalProps> = ({
         </motion.div>
       </div>
     </AnimatePresence>
+    </AdminRouteGuard>
   );
 };

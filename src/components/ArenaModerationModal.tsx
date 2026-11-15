@@ -12,6 +12,7 @@ import {
 } from './icons';
 import { ArenaField, ArenaModerationStatus, UserProfile } from '../types';
 import { isAuthorizedAdmin, moderateArenaInSupabase } from '../lib/supabaseClient';
+import { AdminRouteGuard } from './AdminRouteGuard';
 
 interface ArenaModerationModalProps {
   isOpen: boolean;
@@ -19,9 +20,8 @@ interface ArenaModerationModalProps {
   user: UserProfile;
   arenas: ArenaField[];
   onArenaModerated: (arenaId: string, action: 'approve' | 'archive' | 'delete') => void;
+  onUnauthorizedRedirect?: (reason: string) => void;
 }
-
-const ADMIN_PASSCODE = 'PGK-ITAPEVA';
 
 export const ArenaModerationModal: React.FC<ArenaModerationModalProps> = ({
   isOpen,
@@ -29,17 +29,15 @@ export const ArenaModerationModal: React.FC<ArenaModerationModalProps> = ({
   user,
   arenas,
   onArenaModerated,
+  onUnauthorizedRedirect,
 }) => {
   const [activeStatusTab, setActiveStatusTab] = useState<ArenaModerationStatus>('pending');
   const [processingId, setProcessingId] = useState<string | null>(null);
-  const [adminUnlockedByKey, setAdminUnlockedByKey] = useState(false);
-  const [passcodeInput, setPasscodeInput] = useState('');
-  const [passcodeError, setPasscodeError] = useState('');
   const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
-  const hasAdminAccess = isAuthorizedAdmin(user.email) || adminUnlockedByKey;
+  const hasAdminAccess = isAuthorizedAdmin(user);
 
   const pendingArenas = arenas.filter((a) => a.status === 'pending');
   const approvedArenas = arenas.filter((a) => a.status === 'approved');
@@ -51,17 +49,6 @@ export const ArenaModerationModal: React.FC<ArenaModerationModalProps> = ({
       : activeStatusTab === 'approved'
       ? approvedArenas
       : archivedArenas;
-
-  const handleUnlockAdmin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (passcodeInput.trim().toUpperCase() === ADMIN_PASSCODE) {
-      setAdminUnlockedByKey(true);
-      setPasscodeError('');
-      setPasscodeInput('');
-    } else {
-      setPasscodeError('Chave administrativa inválida. Acesso restrito ao administrador.');
-    }
-  };
 
   const handleAction = async (arena: ArenaField, action: 'approve' | 'archive' | 'delete') => {
     setProcessingId(arena.id);
@@ -83,84 +70,54 @@ export const ArenaModerationModal: React.FC<ArenaModerationModalProps> = ({
   };
 
   return (
-    <AnimatePresence>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 dark:bg-black/90 backdrop-blur-sm">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.96, y: 12 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.96, y: 12 }}
-          className="relative w-full max-w-3xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden"
-        >
-          {/* Header */}
-          <div className="p-5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/90 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-2xl bg-[#38bdf8]/15 border border-[#38bdf8]/40 flex items-center justify-center text-sky-600 dark:text-[#38bdf8]">
-                <AdminShield className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="font-display font-extrabold text-base text-slate-900 dark:text-white">
-                    Painel de Moderação de Arenas
-                  </h2>
-                  <span className="px-2 py-0.5 rounded-full bg-[#38bdf8]/15 text-sky-700 dark:text-[#38bdf8] border border-[#38bdf8]/35 font-mono text-[10px] font-bold uppercase">
-                    Admin Restrito
-                  </span>
+    <AdminRouteGuard
+      user={user}
+      isOpen={isOpen}
+      onUnauthorized={(reason) => {
+        onClose();
+        onUnauthorizedRedirect?.(reason);
+      }}
+    >
+      <AnimatePresence>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 dark:bg-black/90 backdrop-blur-sm">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 12 }}
+            className="relative w-full max-w-3xl bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden"
+          >
+            {/* Header */}
+            <div className="p-5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/90 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-[#38bdf8]/15 border border-[#38bdf8]/40 flex items-center justify-center text-sky-600 dark:text-[#38bdf8]">
+                  <AdminShield className="w-5 h-5" />
                 </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Aprove campos enviados pela comunidade para liberar instantaneamente no radar de Itapeva
-                </p>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-display font-extrabold text-base text-slate-900 dark:text-white">
+                      Painel de Moderação de Arenas
+                    </h2>
+                    <span className="px-2 py-0.5 rounded-full bg-[#38bdf8]/15 text-sky-700 dark:text-[#38bdf8] border border-[#38bdf8]/35 font-mono text-[10px] font-bold uppercase">
+                      Admin Restrito
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Aprove campos enviados pela comunidade para liberar instantaneamente no radar de Itapeva
+                  </p>
+                </div>
               </div>
+
+              <button
+                type="button"
+                onClick={onClose}
+                className="w-8 h-8 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
-            <button
-              type="button"
-              onClick={onClose}
-              className="w-8 h-8 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white flex items-center justify-center cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          {!hasAdminAccess ? (
-            <div className="p-6 sm:p-8 space-y-5 overflow-y-auto text-center max-w-md mx-auto">
-              <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-500 mx-auto">
-                <AdminShield className="w-7 h-7" />
-              </div>
-              <div className="space-y-1.5">
-                <h3 className="font-display font-extrabold text-base text-slate-900 dark:text-white">
-                  Acesso Restrito ao Administrador
-                </h3>
-                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                  A aprovação ou exclusão de arenas é restrita à conta administrativa oficial do ParedãoGK ({user.email}).
-                </p>
-              </div>
-
-              <form onSubmit={handleUnlockAdmin} className="space-y-3 text-left">
-                <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400">
-                  Chave de Liberação Administrativa (Opcional):
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="password"
-                    value={passcodeInput}
-                    onChange={(e) => setPasscodeInput(e.target.value)}
-                    placeholder="Digite a chave admin"
-                    className="flex-1 h-10 px-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-white focus:border-[#38bdf8] focus:outline-none"
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 h-10 rounded-xl bg-[#38bdf8] hover:bg-sky-400 text-slate-950 font-bold text-xs cursor-pointer"
-                  >
-                    Desbloquear
-                  </button>
-                </div>
-                {passcodeError && (
-                  <p className="text-[11px] text-red-500 font-medium">{passcodeError}</p>
-                )}
-              </form>
-            </div>
-          ) : (
-            <>
+            {hasAdminAccess && (
+              <>
               {/* Filter Tabs */}
               <div className="px-5 pt-4 pb-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-white dark:bg-[#020617]">
                 <div className="flex items-center p-1 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 gap-1">
@@ -343,5 +300,6 @@ export const ArenaModerationModal: React.FC<ArenaModerationModalProps> = ({
         </motion.div>
       </div>
     </AnimatePresence>
+    </AdminRouteGuard>
   );
 };
