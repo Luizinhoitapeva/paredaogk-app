@@ -3,6 +3,8 @@ import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import QRCode from 'qrcode';
+import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
@@ -13,8 +15,126 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
+function isPlaceholderSecret(val?: string): boolean {
+  if (!val) return true;
+  const trimmed = val.trim();
+  return (
+    !trimmed ||
+    trimmed.startsWith('MY_') ||
+    trimmed.includes('your-') ||
+    trimmed.includes('placeholder')
+  );
+}
+
+function getCajuPayCredentials(clientPublicKey?: string) {
+  const envPublicKey =
+    process.env.VITE_CAJUPAY_PUBLIC_KEY ||
+    process.env.CAJUPAY_PUBLIC_KEY ||
+    process.env.CAJUPAY_API_KEY ||
+    '';
+  const publicKey = !isPlaceholderSecret(envPublicKey)
+    ? envPublicKey.trim()
+    : !isPlaceholderSecret(clientPublicKey)
+    ? String(clientPublicKey).trim()
+    : '';
+
+  const envSecretKey =
+    process.env.CAJUPAY_SECRET_KEY ||
+    process.env.CAJUPAY_API_SECRET ||
+    '';
+  const secretKey = !isPlaceholderSecret(envSecretKey) ? envSecretKey.trim() : '';
+
+  return {
+    publicKey,
+    secretKey,
+    isLiveConfigured: Boolean(publicKey && secretKey),
+  };
+}
+
+function getServerSupabaseAdminClient() {
+  const url = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (isPlaceholderSecret(url) || isPlaceholderSecret(serviceRoleKey)) {
+    return null;
+  }
+  return createClient(url.trim(), serviceRoleKey.trim(), {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+function computeCrc16Ccitt(payload: string): string {
+  let crc = 0xffff;
+  for (let i = 0; i < payload.length; i++) {
+    crc ^= payload.charCodeAt(i) << 8;
+    for (let j = 0; j < 8; j++) {
+      if ((crc & 0x8000) !== 0) {
+        crc = (crc << 1) ^ 0x1021;
+      } else {
+        crc <<= 1;
+      }
+      crc &= 0xffff;
+    }
+  }
+  return crc.toString(16).toUpperCase().padStart(4, '0');
+}
+
+function tlv(id: string, value: string): string {
+  const len = String(value.length).padStart(2, '0');
+  return `${id}${len}${value}`;
+}
+
+function buildEmvPixPayload(params: {
+  pixKey: string;
+  merchantName: string;
+  merchantCity: string;
+  amount: number;
+  txId: string;
+}): string {
+  const merchantAccountInfo = tlv('00', 'br.gov.bcb.pix') + tlv('01', params.pixKey);
+  const amountStr = params.amount.toFixed(2);
+  const additionalData = tlv('05', params.txId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 25) || 'PAREDAOGK');
+
+  const partial =
+    tlv('00', '01') +
+    tlv('26', merchantAccountInfo) +
+    tlv('52', '0000') +
+    tlv('53', '986') +
+    tlv('54', amountStr) +
+    tlv('58', 'BR') +
+    tlv('59', params.merchantName.slice(0, 25)) +
+    tlv('60', params.merchantCity.slice(0, 15)) +
+    tlv('62', additionalData) +
+    '6304';
+
+  return `${partial}${computeCrc16Ccitt(partial)}`;
+}
+
+async function ensureQrCodeDataUrl(qrCodeText: string, existingBase64?: string | null): Promise<string | null> {
+  if (existingBase64 && existingBase64.trim()) {
+    return existingBase64.startsWith('data:image')
+      ? existingBase64
+      : `data:image/png;base64,${existingBase64}`;
+  }
+  if (!qrCodeText) return null;
+  try {
+    return await QRCode.toDataURL(qrCodeText, {
+      width: 280,
+      margin: 1,
+      color: {
+        dark: '#020617',
+        light: '#ffffff',
+      },
+    });
+  } catch (err) {
+    console.warn('[QRCode Generation Warning]', err);
+    return null;
+  }
+}
+
 const CAJUPAY_WEBHOOK_SIGNING_SECRET =
-  process.env.CAJUPAY_WEBHOOK_SECRET || 'cwhsec_555f1354b2a2851360c50f9bccb3dc9a2d76d7aab72bd82d';
+  process.env.CAJUPAY_WEBHOOK_SECRET ||
+  process.env.CAJUPAY_SECRET_KEY ||
+  'cwhsec_555f1354b2a2851360c50f9bccb3dc9a2d76d7aab72bd82d';
 
 interface RuntimeWebhookConfig {
   id: string;
@@ -39,9 +159,29 @@ interface RuntimeWebhookLog {
   createdAt: string;
 }
 
+interface PixChargeRecord {
+  id: string;
+  userId?: string;
+  type: 'wallet_deposit' | 'match_booking';
+  amount: number;
+  status: 'pending' | 'completed' | 'failed';
+  provider: 'cajupay' | 'cajupay-sandbox';
+  qrCodeText: string;
+  qrCodeBase64: string | null;
+  receiptCode?: string;
+  matchId?: string;
+  description?: string;
+  supabaseCredited: boolean;
+  createdAt: string;
+  expiresAt: string;
+  confirmedAt?: string;
+}
+
+const pixChargesStore = new Map<string, PixChargeRecord>();
+
 const runtimeWebhookConfig: RuntimeWebhookConfig = {
   id: 'cajupay-webhook-default',
-  webhookUrl: `${process.env.VITE_APP_URL || ''}/api/webhook-caju`,
+  webhookUrl: `${process.env.VITE_APP_URL || process.env.APP_URL || ''}/api/webhook-caju`,
   signingSecret: CAJUPAY_WEBHOOK_SIGNING_SECRET,
   isActive: true,
   subscribedEvents: [
@@ -67,18 +207,236 @@ function verifyCajuPayHmac(rawBody: string, signature: string | undefined, secre
   if (!signature) {
     return { valid: false, expected: '' };
   }
-  const calculatedSignature = crypto
-    .createHmac('sha256', secret)
-    .update(rawBody)
-    .digest('hex');
+  const secretsToCheck = Array.from(
+    new Set(
+      [
+        secret,
+        process.env.CAJUPAY_WEBHOOK_SECRET,
+        process.env.CAJUPAY_SECRET_KEY,
+        process.env.CAJUPAY_API_SECRET,
+      ].filter((s): s is string => Boolean(s && !isPlaceholderSecret(s)))
+    )
+  );
 
-  const signatureBuffer = Buffer.from(signature, 'utf8');
-  const calculatedBuffer = Buffer.from(calculatedSignature, 'utf8');
-  const valid =
-    signatureBuffer.length === calculatedBuffer.length &&
-    crypto.timingSafeEqual(signatureBuffer, calculatedBuffer);
+  let expectedPrimary = '';
+  for (const candidateSecret of secretsToCheck) {
+    const calculatedSignature = crypto
+      .createHmac('sha256', candidateSecret)
+      .update(rawBody)
+      .digest('hex');
 
-  return { valid, expected: calculatedSignature };
+    if (!expectedPrimary) expectedPrimary = calculatedSignature;
+
+    const cleanSig = signature.replace(/^sha256=/i, '').trim();
+    const signatureBuffer = Buffer.from(cleanSig, 'utf8');
+    const calculatedBuffer = Buffer.from(calculatedSignature, 'utf8');
+    if (
+      signatureBuffer.length === calculatedBuffer.length &&
+      crypto.timingSafeEqual(signatureBuffer, calculatedBuffer)
+    ) {
+      return { valid: true, expected: calculatedSignature };
+    }
+  }
+
+  return { valid: false, expected: expectedPrimary };
+}
+
+async function creditSupabaseWalletFromWebhook(params: {
+  paymentId: string;
+  userId?: string;
+  amountBrl: number;
+  receiptCode: string;
+  description?: string;
+}): Promise<{ credited: boolean; newBalance?: number; alreadyProcessed?: boolean; reason?: string }> {
+  const { paymentId, userId, amountBrl, receiptCode, description } = params;
+  if (!userId || userId === 'usr-guest' || !amountBrl || amountBrl <= 0) {
+    return { credited: false, reason: 'userId_or_amount_missing' };
+  }
+
+  const supabaseAdmin = getServerSupabaseAdminClient();
+  if (!supabaseAdmin) {
+    return { credited: false, reason: 'supabase_service_role_not_configured' };
+  }
+
+  try {
+    const txId = `tx-caju-${paymentId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+    const { data: existingTx } = await supabaseAdmin
+      .from('wallet_transactions')
+      .select('id, status')
+      .eq('id', txId)
+      .maybeSingle();
+
+    if (existingTx && existingTx.status === 'completed') {
+      return { credited: true, alreadyProcessed: true };
+    }
+
+    const { data: profile, error: profFetchErr } = await supabaseAdmin
+      .from('profiles')
+      .select('wallet_balance')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (profFetchErr || !profile) {
+      return { credited: false, reason: profFetchErr?.message || 'profile_not_found' };
+    }
+
+    const currentBalance = Number(profile.wallet_balance || 0);
+    const newBalance = Number((currentBalance + amountBrl).toFixed(2));
+    const nowIso = new Date().toISOString();
+
+    const { error: txErr } = await supabaseAdmin.from('wallet_transactions').upsert([
+      {
+        id: txId,
+        user_id: userId,
+        type: 'pix_in',
+        amount: amountBrl,
+        description: description || 'Recarga Pix CajuPay Confirmada (Webhook)',
+        status: 'completed',
+        receipt_code: receiptCode,
+        provider: 'cajupay',
+        created_at: nowIso,
+      },
+    ]);
+
+    if (txErr) {
+      return { credited: false, reason: txErr.message };
+    }
+
+    const { error: profUpdateErr } = await supabaseAdmin
+      .from('profiles')
+      .update({
+        wallet_balance: newBalance,
+        updated_at: nowIso,
+      })
+      .eq('id', userId);
+
+    if (profUpdateErr) {
+      return { credited: false, reason: profUpdateErr.message };
+    }
+
+    await supabaseAdmin.from('notifications').insert([
+      {
+        id: `notif-caju-${Date.now()}`,
+        user_id: userId,
+        category: 'wallet',
+        title: '💰 Recarga Pix CajuPay Confirmada!',
+        description: `Crédito de R$ ${amountBrl.toFixed(2)} adicionado à sua carteira digital. Comprovante: ${receiptCode}.`,
+        read: false,
+        created_at: nowIso,
+      },
+    ]);
+
+    return { credited: true, newBalance };
+  } catch (err: any) {
+    console.warn('[Server Webhook Supabase Credit Warning]', err?.message || err);
+    return { credited: false, reason: err?.message || 'unexpected_error' };
+  }
+}
+
+async function processApprovedWebhookPayload(params: {
+  parsedPayload: Record<string, any>;
+  signatureHeader: string;
+  hmacValid: boolean;
+  source: 'live' | 'test_dispatch';
+}) {
+  const { parsedPayload, signatureHeader, hmacValid, source } = params;
+  const nowIso = new Date().toISOString();
+  const event = String(parsedPayload?.event || 'payment.confirmed');
+  const data = parsedPayload?.data || {};
+  const paymentId = String(data?.id || parsedPayload?.paymentId || `caju_${Date.now()}`);
+  const statusNormalized = String(data?.status || '').toLowerCase();
+
+  const isPaymentApprovedEvent =
+    event === 'payment.confirmed' ||
+    event === 'payment.approved' ||
+    event === 'pix.confirmed' ||
+    event === 'pix.paid' ||
+    statusNormalized === 'paid' ||
+    statusNormalized === 'approved' ||
+    statusNormalized === 'confirmed';
+
+  const existingCharge = pixChargesStore.get(paymentId);
+  const amountBrl = Number(
+    data?.amount_brl ??
+      (data?.amount ? Number(data.amount) / 100 : existingCharge?.amount ?? 0)
+  );
+  const userId = String(
+    data?.metadata?.user_id || data?.user_id || existingCharge?.userId || ''
+  ).trim();
+  const receiptCode = String(
+    data?.pix_receipt ||
+      existingCharge?.receiptCode ||
+      `CAJU-${paymentId.replace(/[^a-zA-Z0-9]/g, '').slice(-6).toUpperCase() || Date.now().toString().slice(-6)}`
+  );
+
+  let supabaseCredited = existingCharge?.supabaseCredited || false;
+  let newWalletBalance: number | undefined;
+  let alreadyProcessed = existingCharge?.status === 'completed';
+
+  if (isPaymentApprovedEvent && !alreadyProcessed) {
+    if (userId && amountBrl > 0) {
+      const creditResult = await creditSupabaseWalletFromWebhook({
+        paymentId,
+        userId,
+        amountBrl,
+        receiptCode,
+        description: existingCharge?.description || 'Recarga Pix CajuPay Confirmada',
+      });
+      supabaseCredited = creditResult.credited;
+      newWalletBalance = creditResult.newBalance;
+      alreadyProcessed = Boolean(creditResult.alreadyProcessed);
+    }
+
+    const updatedCharge: PixChargeRecord = {
+      id: paymentId,
+      userId: userId || undefined,
+      type: existingCharge?.type || (data?.metadata?.type === 'match_booking' ? 'match_booking' : 'wallet_deposit'),
+      amount: amountBrl,
+      status: 'completed',
+      provider: existingCharge?.provider || 'cajupay',
+      qrCodeText: existingCharge?.qrCodeText || '',
+      qrCodeBase64: existingCharge?.qrCodeBase64 || null,
+      receiptCode,
+      matchId: data?.metadata?.match_id || existingCharge?.matchId,
+      description: existingCharge?.description,
+      supabaseCredited,
+      createdAt: existingCharge?.createdAt || nowIso,
+      expiresAt: existingCharge?.expiresAt || nowIso,
+      confirmedAt: nowIso,
+    };
+    pixChargesStore.set(paymentId, updatedCharge);
+  }
+
+  const responseBody = {
+    received: true,
+    authenticated: hmacValid,
+    event,
+    status: data?.status || 'processed',
+    paymentId,
+    userId: userId || undefined,
+    amount: amountBrl,
+    receiptCode,
+    supabaseCredited,
+    newWalletBalance,
+    alreadyProcessed,
+    matchId: data?.metadata?.match_id,
+    processedAt: nowIso,
+  };
+
+  pushWebhookLog({
+    id: `whlog-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+    event,
+    endpointUrl: runtimeWebhookConfig.webhookUrl || '/api/webhook-caju',
+    httpStatus: 200,
+    hmacValid,
+    signatureHeader,
+    payload: parsedPayload,
+    responseBody,
+    source,
+    createdAt: nowIso,
+  });
+
+  return responseBody;
 }
 
 // Capturar raw body para validação criptográfica HMAC no webhook
@@ -87,17 +445,20 @@ app.use(express.json());
 
 // Endpoint de integridade
 app.get('/api/health', (_req: Request, res: Response) => {
+  const creds = getCajuPayCredentials();
   res.json({
     status: 'ok',
     app: 'ParedãoGK',
-    cajupayConfigured: Boolean(process.env.CAJUPAY_API_KEY && process.env.CAJUPAY_API_SECRET),
-    time: new Date().toISOString()
+    cajupayConfigured: creds.isLiveConfigured,
+    cajupayPublicKeyConfigured: Boolean(creds.publicKey),
+    time: new Date().toISOString(),
   });
 });
 
 /**
  * 1. Rota de API: /api/gerar-pix-caju
- * Gera cobrança Pix via API oficial CajuPay (https://api.cajupay.com.br/api/payments/pix)
+ * Gera cobrança Pix dinâmica via API oficial CajuPay (https://api.cajupay.com.br/api/payments/pix)
+ * utilizando VITE_CAJUPAY_PUBLIC_KEY e CAJUPAY_SECRET_KEY.
  */
 app.post('/api/gerar-pix-caju', async (req: Request, res: Response) => {
   try {
@@ -107,58 +468,75 @@ app.post('/api/gerar-pix-caju', async (req: Request, res: Response) => {
       description,
       customer,
       matchId,
-      expiresIn = 3600
+      userId,
+      type = 'wallet_deposit',
+      expiresIn = 3600,
     } = req.body || {};
 
     const paymentAmount = Number(amount || valor || 25);
 
-    if (!paymentAmount || paymentAmount <= 0) {
+    if (!paymentAmount || isNaN(paymentAmount) || paymentAmount <= 0) {
       return res.status(400).json({
         success: false,
-        error: 'Valor de pagamento inválido.'
+        error: 'Valor de pagamento inválido.',
       });
     }
 
     const houseFee = 5;
     const goalkeeperNet = Math.max(0, Number((paymentAmount - houseFee).toFixed(2)));
-
     const idempotencyKey = crypto.randomUUID();
-    const apiKey = process.env.CAJUPAY_API_KEY || 'caju_live_test_key';
-    const apiSecret = process.env.CAJUPAY_API_SECRET || 'caju_sec_test_secret';
+    const clientPublicKey = req.headers['x-cajupay-public-key'] as string | undefined;
+    const { publicKey, secretKey, isLiveConfigured } = getCajuPayCredentials(clientPublicKey);
+
+    const effectiveWebhookUrl =
+      runtimeWebhookConfig.webhookUrl && !runtimeWebhookConfig.webhookUrl.startsWith('/')
+        ? runtimeWebhookConfig.webhookUrl
+        : `${req.protocol}://${req.get('host')}/api/webhook-caju`;
+
+    const resolvedDescription =
+      description ||
+      (type === 'wallet_deposit'
+        ? `Recarga Carteira Digital ParedãoGK - R$ ${paymentAmount.toFixed(2)}`
+        : `Convocação Goleiro ParedãoGK - Partida #${matchId || Date.now()}`);
 
     const payloadCaju = {
       amount: Math.round(paymentAmount * 100), // Enviar em centavos
-      description: description || `Convocação Goleiro ParedãoGK - Partida #${matchId || Date.now()}`,
+      description: resolvedDescription,
       expires_in: expiresIn,
+      webhook_url: effectiveWebhookUrl,
       customer: {
         name: customer?.name || 'Contratante ParedãoGK',
         email: customer?.email || 'paredaogkbr@gmail.com',
-        tax_id: customer?.cpf ? customer.cpf.replace(/\D/g, '') : '12345678909',
-        phone: customer?.phone ? customer.phone.replace(/\D/g, '') : '15981596443'
+        tax_id: customer?.cpf ? String(customer.cpf).replace(/\D/g, '') : '12345678909',
+        phone: customer?.phone ? String(customer.phone).replace(/\D/g, '') : '15981596443',
       },
       metadata: {
         platform: 'ParedaoGK',
-        match_id: matchId || `mtch-${Date.now()}`,
-        created_at: new Date().toISOString()
-      }
+        type,
+        user_id: userId || undefined,
+        match_id: matchId || (type === 'match_booking' ? `mtch-${Date.now()}` : undefined),
+        public_key_ref: publicKey ? `${publicKey.slice(0, 8)}...` : undefined,
+        created_at: new Date().toISOString(),
+      },
     };
 
     let cajuResponse: any = null;
     let isLiveResponse = false;
 
-    // Se chaves CajuPay configuradas no ambiente, chama a API oficial
-    if (process.env.CAJUPAY_API_KEY && process.env.CAJUPAY_API_SECRET) {
+    if (isLiveConfigured) {
       try {
         const response = await fetch('https://api.cajupay.com.br/api/payments/pix', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-API-Key': apiKey,
-            'X-API-Secret': apiSecret,
+            'X-API-Key': publicKey,
+            'X-API-Secret': secretKey,
+            'X-Public-Key': publicKey,
+            'Authorization': `Bearer ${secretKey}`,
             'Idempotency-Key': idempotencyKey,
-            'User-Agent': 'ParedaoGK-App/2.5'
+            'User-Agent': 'ParedaoGK-App/3.0',
           },
-          body: JSON.stringify(payloadCaju)
+          body: JSON.stringify(payloadCaju),
         });
 
         if (response.ok) {
@@ -173,53 +551,213 @@ app.post('/api/gerar-pix-caju', async (req: Request, res: Response) => {
       }
     }
 
+    const nowIso = new Date().toISOString();
+
     if (isLiveResponse && cajuResponse) {
+      const chargeId = String(cajuResponse.id || cajuResponse.data?.id || `caju_${Date.now()}`);
+      const qrCodeText = String(
+        cajuResponse.pix?.qrcode ||
+          cajuResponse.pix?.qr_code ||
+          cajuResponse.data?.pix?.qrcode ||
+          cajuResponse.qrcode ||
+          cajuResponse.qr_code ||
+          cajuResponse.pix_code ||
+          ''
+      );
+      const rawBase64 =
+        cajuResponse.pix?.qrcode_base64 ||
+        cajuResponse.pix?.qr_code_base64 ||
+        cajuResponse.data?.pix?.qrcode_base64 ||
+        cajuResponse.qrcode_base64 ||
+        cajuResponse.qr_code_base64 ||
+        null;
+
+      const qrCodeBase64 = await ensureQrCodeDataUrl(qrCodeText, rawBase64);
+      const expiresAt =
+        cajuResponse.pix?.expires_at ||
+        cajuResponse.expires_at ||
+        new Date(Date.now() + expiresIn * 1000).toISOString();
+
+      const record: PixChargeRecord = {
+        id: chargeId,
+        userId: userId || undefined,
+        type: type === 'match_booking' ? 'match_booking' : 'wallet_deposit',
+        amount: paymentAmount,
+        status: 'pending',
+        provider: 'cajupay',
+        qrCodeText,
+        qrCodeBase64,
+        matchId,
+        description: resolvedDescription,
+        supabaseCredited: false,
+        createdAt: nowIso,
+        expiresAt,
+      };
+      pixChargesStore.set(chargeId, record);
+
       return res.status(200).json({
         success: true,
         provider: 'cajupay',
-        id: cajuResponse.id || `caju_${Date.now()}`,
+        id: chargeId,
         status: cajuResponse.status || 'pending',
         amount: paymentAmount,
         houseFee,
         goalkeeperNet,
-        qrCodeText: cajuResponse.pix?.qrcode || cajuResponse.qrcode || '',
-        qrCodeBase64: cajuResponse.pix?.qrcode_base64 || cajuResponse.qrcode_base64 || null,
-        expiresAt: cajuResponse.pix?.expires_at || new Date(Date.now() + expiresIn * 1000).toISOString(),
-        idempotencyKey
+        qrCodeText,
+        qrCodeBase64,
+        expiresAt,
+        idempotencyKey,
+        publicKeyConfigured: Boolean(publicKey),
       });
     }
 
-    // Payload Pix Copia e Cola formatado conforme o padrão oficial do Banco Central
-    const pixCode = `00020126580014br.gov.bcb.pix0136cajupay-pix-${idempotencyKey.slice(0, 8)}@cajupay.com.br520400005303986540${paymentAmount.toFixed(2)}5802BR5920PAREDAOGK CAJUPAY6009SAO PAULO62070503***6304CAJU`;
+    // Payload Pix Copia e Cola EMV BR Code válido com CRC16-CCITT + QR Code PNG real
+    const chargeId = `caju_pix_${Date.now()}_${idempotencyKey.slice(0, 6)}`;
+    const pixCode = buildEmvPixPayload({
+      pixKey: 'paredaogkbr@gmail.com',
+      merchantName: 'PAREDAOGK CAJUPAY',
+      merchantCity: 'ITAPEVA SP',
+      amount: paymentAmount,
+      txId: `PGK${idempotencyKey.replace(/-/g, '').slice(0, 18)}`,
+    });
+    const qrCodeBase64 = await ensureQrCodeDataUrl(pixCode, null);
+    const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+
+    const sandboxRecord: PixChargeRecord = {
+      id: chargeId,
+      userId: userId || undefined,
+      type: type === 'match_booking' ? 'match_booking' : 'wallet_deposit',
+      amount: paymentAmount,
+      status: 'pending',
+      provider: 'cajupay-sandbox',
+      qrCodeText: pixCode,
+      qrCodeBase64,
+      matchId,
+      description: resolvedDescription,
+      supabaseCredited: false,
+      createdAt: nowIso,
+      expiresAt,
+    };
+    pixChargesStore.set(chargeId, sandboxRecord);
 
     return res.status(200).json({
       success: true,
       provider: 'cajupay-sandbox',
-      id: `caju_sim_${Date.now()}`,
+      id: chargeId,
       status: 'pending',
       amount: paymentAmount,
       houseFee,
       goalkeeperNet,
       qrCodeText: pixCode,
-      qrCodeBase64: null,
-      expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+      qrCodeBase64,
+      expiresAt,
       idempotencyKey,
-      note: 'Pix gerado com payload CajuPay (chaves de produção configuráveis no .env)'
+      publicKeyConfigured: Boolean(publicKey),
+      note: isLiveConfigured
+        ? 'API CajuPay indisponível no momento — QR Code EMV gerado em modo homologação'
+        : 'Pix EMV gerado em modo homologação (configure VITE_CAJUPAY_PUBLIC_KEY e CAJUPAY_SECRET_KEY para produção)',
     });
   } catch (error: any) {
     console.error('[CajuPay Gerar Pix Server Error]', error);
     return res.status(500).json({
       success: false,
-      error: error?.message || 'Erro interno ao processar pagamento Pix CajuPay.'
+      error: error?.message || 'Erro interno ao processar pagamento Pix CajuPay.',
+    });
+  }
+});
+
+/**
+ * 1b. Consulta de status em tempo real de uma cobrança Pix CajuPay
+ */
+app.get('/api/cajupay/payment-status/:paymentId', (req: Request, res: Response) => {
+  const { paymentId } = req.params;
+  const charge = pixChargesStore.get(paymentId);
+  if (!charge) {
+    return res.status(404).json({
+      success: false,
+      error: 'Cobrança Pix não encontrada.',
+    });
+  }
+  return res.status(200).json({
+    success: true,
+    charge,
+  });
+});
+
+/**
+ * 1c. Endpoint de Homologação: Simula um webhook oficial payment.confirmed assinado com HMAC-SHA256
+ */
+app.post('/api/cajupay/simulate-webhook', async (req: Request, res: Response) => {
+  try {
+    const { paymentId, amount, userId, description } = req.body || {};
+    const resolvedPaymentId = String(paymentId || `caju_sim_${Date.now()}`);
+    const existingCharge = pixChargesStore.get(resolvedPaymentId);
+    const resolvedAmount = Number(amount || existingCharge?.amount || 25);
+
+    if (!resolvedAmount || isNaN(resolvedAmount) || resolvedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valor inválido para simulação de confirmação Pix.',
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    const receiptCode = `CAJU-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+    const webhookPayload = {
+      id: `evt_sim_${Date.now().toString().slice(-6)}`,
+      event: 'payment.confirmed',
+      created_at: nowIso,
+      provider: 'cajupay',
+      data: {
+        id: resolvedPaymentId,
+        amount: Math.round(resolvedAmount * 100),
+        amount_brl: resolvedAmount,
+        currency: 'BRL',
+        status: 'paid',
+        pix_receipt: receiptCode,
+        metadata: {
+          platform: 'ParedaoGK',
+          type: 'wallet_deposit',
+          user_id: userId || existingCharge?.userId || undefined,
+          description: description || 'Recarga Carteira Digital ParedãoGK',
+          simulation: true,
+        },
+      },
+    };
+
+    const rawBody = JSON.stringify(webhookPayload);
+    const signature = crypto
+      .createHmac('sha256', runtimeWebhookConfig.signingSecret)
+      .update(rawBody)
+      .digest('hex');
+
+    const result = await processApprovedWebhookPayload({
+      parsedPayload: webhookPayload,
+      signatureHeader: signature,
+      hmacValid: true,
+      source: 'test_dispatch',
+    });
+
+    return res.status(200).json({
+      success: true,
+      ...result,
+    });
+  } catch (err: any) {
+    console.error('[CajuPay Simulate Webhook Error]', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao simular webhook de confirmação CajuPay.',
     });
   }
 });
 
 /**
  * 2. Rota de API: /api/webhook-caju
- * Validação rigorosa HMAC-SHA256 no cabeçalho X-CajuPay-Signature e registro em tempo real
+ * Validação rigorosa HMAC-SHA256 no cabeçalho X-CajuPay-Signature, registro em tempo real
+ * e crédito automático permanente na carteira do usuário no Supabase.
  */
-app.post('/api/webhook-caju', (req: Request, res: Response) => {
+app.post('/api/webhook-caju', async (req: Request, res: Response) => {
   const receivedAt = new Date().toISOString();
   try {
     const rawBodyBuffer = req.body;
@@ -304,35 +842,18 @@ app.post('/api/webhook-caju', (req: Request, res: Response) => {
       return res.status(401).json(responseBody);
     }
 
-    const { event, data } = parsedPayload;
-    const responseBody = {
-      received: true,
-      authenticated: true,
-      event: event || 'payment.confirmed',
-      status: data?.status || 'processed',
-      paymentId: data?.id,
-      matchId: data?.metadata?.match_id,
-      processedAt: receivedAt,
-    };
-
-    console.log(`[CajuPay Webhook] Evento validado com sucesso: ${event || data?.status}`, {
-      paymentId: data?.id,
-      amount: data?.amount,
-      status: data?.status,
-      matchId: data?.metadata?.match_id,
+    const responseBody = await processApprovedWebhookPayload({
+      parsedPayload,
+      signatureHeader: signature,
+      hmacValid: true,
+      source: 'live',
     });
 
-    pushWebhookLog({
-      id: `whlog-${Date.now()}`,
-      event: String(event || data?.status || 'payment.confirmed'),
-      endpointUrl: runtimeWebhookConfig.webhookUrl || '/api/webhook-caju',
-      httpStatus: 200,
-      hmacValid: true,
-      signatureHeader: signature,
-      payload: parsedPayload,
-      responseBody,
-      source: 'live',
-      createdAt: receivedAt,
+    console.log(`[CajuPay Webhook] Evento processado com sucesso: ${responseBody.event}`, {
+      paymentId: responseBody.paymentId,
+      amount: responseBody.amount,
+      userId: responseBody.userId,
+      supabaseCredited: responseBody.supabaseCredited,
     });
 
     return res.status(200).json(responseBody);

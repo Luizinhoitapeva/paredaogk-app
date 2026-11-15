@@ -24,6 +24,12 @@ import {
   recordWalletTransactionInSupabase,
   registerAdminWithdrawalRequestLocal,
   isAuthorizedAdmin,
+  generateCajuPayPixCharge,
+  checkCajuPayPaymentStatus,
+  simulateCajuPayWebhookConfirmation,
+  creditWalletDepositInSupabase,
+  subscribeToUserWalletRealtime,
+  CajuPayPixChargeResponse,
 } from '../lib/supabaseClient';
 import { EarningsDashboardSection } from './EarningsDashboardSection';
 import { ReportScope } from '../utils/pdfReportGenerator';
@@ -58,37 +64,47 @@ export const WalletTab: React.FC<WalletTabProps> = ({
   const [isLoadingWallet, setIsLoadingWallet] = useState(true);
   const [isSupabaseSynced, setIsSupabaseSynced] = useState(false);
 
+  const refreshWalletFromSupabase = React.useCallback(async () => {
+    try {
+      const cached = await getOfflineWallet();
+      const initialTx = cached?.transactions?.length ? cached.transactions : [];
+      if (cached?.transactions?.length) {
+        setTransactions(cached.transactions);
+      }
+      const summary = await fetchWalletDashboardFromSupabase({
+        user,
+        localMatches: matches,
+        localTransactions: initialTx,
+      });
+      setTransactions(summary.transactions);
+      setIsSupabaseSynced(summary.syncedFromSupabase);
+      if (
+        summary.syncedFromSupabase &&
+        (summary.walletBalance !== user.walletBalance ||
+          summary.cashbackBalance !== user.cashbackBalance)
+      ) {
+        onUpdateBalance(summary.walletBalance, summary.cashbackBalance);
+      }
+    } catch (e) {
+      console.warn('[Wallet Supabase Sync Error]', e);
+    } finally {
+      setIsLoadingWallet(false);
+    }
+  }, [user.id, matches.length]);
+
   // Carregar extrato offline e sincronizar automaticamente com as tabelas de carteira do Supabase
   React.useEffect(() => {
-    let isMounted = true;
     setIsLoadingWallet(true);
+    refreshWalletFromSupabase();
 
-    getOfflineWallet()
-      .then((cached) => {
-        const initialTx = cached?.transactions?.length ? cached.transactions : [];
-        if (isMounted && cached?.transactions?.length) {
-          setTransactions(cached.transactions);
-        }
-        return fetchWalletDashboardFromSupabase({
-          user,
-          localMatches: matches,
-          localTransactions: initialTx,
-        });
-      })
-      .then((summary) => {
-        if (!isMounted) return;
-        setTransactions(summary.transactions);
-        setIsSupabaseSynced(summary.syncedFromSupabase);
-      })
-      .catch((e) => console.warn('[Wallet Supabase Sync Error]', e))
-      .finally(() => {
-        if (isMounted) setIsLoadingWallet(false);
-      });
+    const unsubscribe = subscribeToUserWalletRealtime(user.id, () => {
+      refreshWalletFromSupabase();
+    });
 
     return () => {
-      isMounted = false;
+      unsubscribe();
     };
-  }, [user.id, matches.length]);
+  }, [user.id, matches.length, refreshWalletFromSupabase]);
 
   // Salvar no armazenamento offline sempre que houver alteração
   React.useEffect(() => {
@@ -155,10 +171,116 @@ export const WalletTab: React.FC<WalletTabProps> = ({
   const [withdrawSuccessCode, setWithdrawSuccessCode] = useState<string | null>(null);
   const [withdrawError, setWithdrawError] = useState('');
 
-  // Deposit form state
+  // Deposit form state (CajuPay Pix Real Integration)
   const [depositAmount, setDepositAmount] = useState('25.00');
+  const [cajuPixCharge, setCajuPixCharge] = useState<CajuPayPixChargeResponse | null>(null);
+  const [isGeneratingPix, setIsGeneratingPix] = useState(false);
+  const [pixGenerationError, setPixGenerationError] = useState('');
   const [hasCopiedPix, setHasCopiedPix] = useState(false);
   const [isConfirmingDeposit, setIsConfirmingDeposit] = useState(false);
+  const [depositSuccessInfo, setDepositSuccessInfo] = useState<{
+    amount: number;
+    receiptCode: string;
+    syncedToSupabase: boolean;
+    errorMessage?: string;
+  } | null>(null);
+  const [pixCountdown, setPixCountdown] = useState(900);
+  const processedPaymentIdsRef = React.useRef<Set<string>>(new Set());
+
+  const requestCajuPayPix = React.useCallback(
+    async (amountStr: string) => {
+      const numericAmount = parseFloat(amountStr.replace(',', '.'));
+      if (isNaN(numericAmount) || numericAmount <= 0) return;
+
+      setIsGeneratingPix(true);
+      setPixGenerationError('');
+      setHasCopiedPix(false);
+      setDepositSuccessInfo(null);
+
+      try {
+        const charge = await generateCajuPayPixCharge({
+          amount: numericAmount,
+          userId: user.id,
+          type: 'wallet_deposit',
+          description: `Recarga Carteira Digital ParedãoGK - R$ ${numericAmount.toFixed(2)}`,
+          customer: {
+            name: user.name,
+            email: user.email,
+            cpf: user.cpf,
+            phone: user.phone,
+          },
+        });
+        setCajuPixCharge(charge);
+        setPixCountdown(900);
+      } catch (err: any) {
+        console.error('[WalletTab CajuPay QR Error]', err);
+        setPixGenerationError(err?.message || 'Erro ao gerar QR Code Pix no CajuPay.');
+      } finally {
+        setIsGeneratingPix(false);
+      }
+    },
+    [user.id, user.name, user.email, user.cpf, user.phone]
+  );
+
+  const finalizeConfirmedPixDeposit = React.useCallback(
+    async (params: { paymentId: string; amount: number; receiptCode: string }) => {
+      if (processedPaymentIdsRef.current.has(params.paymentId)) return;
+      processedPaymentIdsRef.current.add(params.paymentId);
+
+      const creditRes = await creditWalletDepositInSupabase({
+        userId: user.id,
+        paymentId: params.paymentId,
+        amount: params.amount,
+        receiptCode: params.receiptCode,
+        description: 'Recarga Pix CajuPay Instantânea',
+        fallbackCurrentBalance: user.walletBalance,
+      });
+
+      setTransactions((prev) => {
+        if (prev.some((tx) => tx.id === creditRes.transaction.id)) return prev;
+        return [creditRes.transaction, ...prev];
+      });
+      onUpdateBalance(creditRes.newWalletBalance, user.cashbackBalance);
+      setDepositSuccessInfo({
+        amount: params.amount,
+        receiptCode: params.receiptCode,
+        syncedToSupabase: creditRes.synced,
+        errorMessage: creditRes.errorMessage,
+      });
+    },
+    [user.id, user.walletBalance, user.cashbackBalance, onUpdateBalance]
+  );
+
+  // Gerar cobrança Pix no CajuPay automaticamente ao abrir o modal
+  React.useEffect(() => {
+    if (!isDepositModalOpen) return;
+    requestCajuPayPix(depositAmount);
+  }, [isDepositModalOpen]);
+
+  // Countdown de expiração do QR Code + Polling de confirmação do webhook /api/webhook-caju
+  React.useEffect(() => {
+    if (!isDepositModalOpen || !cajuPixCharge || depositSuccessInfo) return;
+
+    const timer = setInterval(() => {
+      setPixCountdown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+
+    const poller = setInterval(async () => {
+      const statusRes = await checkCajuPayPaymentStatus(cajuPixCharge.id);
+      if (statusRes.status === 'completed') {
+        await finalizeConfirmedPixDeposit({
+          paymentId: cajuPixCharge.id,
+          amount: cajuPixCharge.amount,
+          receiptCode: statusRes.receiptCode || generateReceiptCode(),
+        });
+      }
+    }, 3000);
+
+    return () => {
+      clearInterval(timer);
+      clearInterval(poller);
+    };
+  }, [isDepositModalOpen, cajuPixCharge, depositSuccessInfo, finalizeConfirmedPixDeposit]);
 
   // Handle Withdraw submission
   const handleWithdrawSubmit = (e: React.FormEvent) => {
@@ -209,47 +331,47 @@ export const WalletTab: React.FC<WalletTabProps> = ({
     }, 700);
   };
 
-  // Handle Deposit confirmation
-  const handleConfirmDeposit = () => {
+  // Handle Homologation / Webhook Deposit Confirmation
+  const handleConfirmDeposit = async () => {
     const amountNum = parseFloat(depositAmount.replace(',', '.'));
     if (isNaN(amountNum) || amountNum <= 0) return;
 
     setIsConfirmingDeposit(true);
-    setTimeout(() => {
-      const code = generateReceiptCode();
-      const newBalance = Number((user.walletBalance + amountNum).toFixed(2));
-      const newTx: Transaction = {
-        id: `tx-${Date.now()}`,
-        type: 'pix_in',
+    setPixGenerationError('');
+
+    try {
+      const activeChargeId = cajuPixCharge?.id || `caju_sim_${Date.now()}`;
+      const simResult = await simulateCajuPayWebhookConfirmation({
+        paymentId: activeChargeId,
         amount: amountNum,
-        description: 'Recarga Pix CajuPay Instantânea',
-        date: new Date().toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }),
-        status: 'completed',
-        receiptCode: code,
-        provider: 'cajupay',
-      };
-
-      setTransactions((prev) => [newTx, ...prev]);
-      onUpdateBalance(newBalance, user.cashbackBalance);
-      recordWalletTransactionInSupabase({
         userId: user.id,
-        transaction: newTx,
-        newWalletBalance: newBalance,
-        newCashbackBalance: user.cashbackBalance,
-      }).catch((e) => console.warn('[Deposit Supabase Sync]', e));
+        description: `Recarga Carteira Digital ParedãoGK - R$ ${amountNum.toFixed(2)}`,
+      });
 
+      await finalizeConfirmedPixDeposit({
+        paymentId: simResult.paymentId,
+        amount: simResult.amount,
+        receiptCode: simResult.receiptCode,
+      });
+    } catch (err: any) {
+      console.error('[WalletTab Deposit Simulation Error]', err);
+      setPixGenerationError(err?.message || 'Erro ao confirmar pagamento Pix no webhook CajuPay.');
+    } finally {
       setIsConfirmingDeposit(false);
-      setIsDepositModalOpen(false);
-    }, 900);
+    }
   };
 
   const copyPixCode = () => {
-    const formattedAmt = Number(depositAmount || 25).toFixed(2);
-    navigator.clipboard?.writeText(
-      `00020126580014br.gov.bcb.pix0136paredaogkbr@gmail.com5204000053039865405${formattedAmt}5802BR5925PAREDAO GK GESTAO ESPORT6008ITAPEVA62070503***6304E8A1`
-    );
+    if (!cajuPixCharge?.qrCodeText) return;
+    navigator.clipboard?.writeText(cajuPixCharge.qrCodeText);
     setHasCopiedPix(true);
     setTimeout(() => setHasCopiedPix(false), 2000);
+  };
+
+  const formatCountdown = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
   };
 
   const filteredTransactions = transactions.filter((t) => {
@@ -679,14 +801,14 @@ export const WalletTab: React.FC<WalletTabProps> = ({
         </div>
       )}
 
-      {/* Deposit Modal (Pix Copia e Cola / QR Code) */}
+      {/* Deposit Modal (CajuPay Pix Dinâmico + Copia e Cola + Persistência Supabase) */}
       {isDepositModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.95 }}
-            className="relative w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-2xl space-y-4 text-center"
+            className="relative w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-2xl space-y-4 text-center my-6"
           >
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
               <h3 className="font-display font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
@@ -694,81 +816,178 @@ export const WalletTab: React.FC<WalletTabProps> = ({
                 Adicionar Saldo via Pix
               </h3>
               <button
-                onClick={() => setIsDepositModalOpen(false)}
+                type="button"
+                onClick={() => {
+                  setIsDepositModalOpen(false);
+                  setDepositSuccessInfo(null);
+                }}
                 className="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <p className="text-xs text-slate-600 dark:text-slate-400">
-              Escolha o valor para recarregar sua carteira com liberação imediata:
-            </p>
+            {depositSuccessInfo ? (
+              <div className="py-5 space-y-4">
+                <div className="w-16 h-16 rounded-full bg-emerald-500/15 dark:bg-emerald-500/20 border-2 border-emerald-500 flex items-center justify-center text-emerald-600 dark:text-emerald-400 mx-auto">
+                  <Check className="w-8 h-8" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-lg text-slate-900 dark:text-white">
+                    Pix CajuPay Confirmado!
+                  </h4>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                    Crédito de{' '}
+                    <strong className="text-emerald-600 dark:text-[#22c55e] font-mono">
+                      +{formatCurrency(depositSuccessInfo.amount)}
+                    </strong>{' '}
+                    adicionado à sua carteira digital.
+                  </p>
+                </div>
 
-            <div className="grid grid-cols-4 gap-2">
-              {['20.00', '25.00', '30.00', '50.00'].map((val) => (
+                <div className="p-3 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono space-y-1">
+                  <div className="text-emerald-700 dark:text-emerald-400 font-bold">
+                    Comprovante: {depositSuccessInfo.receiptCode}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                    {depositSuccessInfo.syncedToSupabase
+                      ? 'Saldo persistido permanentemente no Supabase (profiles + wallet_transactions).'
+                      : depositSuccessInfo.errorMessage || 'Sincronizado localmente na sessão.'}
+                  </div>
+                </div>
+
                 <button
                   type="button"
-                  key={val}
-                  onClick={() => setDepositAmount(val)}
-                  className={`py-2 text-xs rounded-xl border font-mono transition-all cursor-pointer ${
-                    depositAmount === val
-                      ? 'bg-emerald-500/15 dark:bg-emerald-500/20 border-emerald-500 dark:border-emerald-400 text-emerald-700 dark:text-emerald-300 font-bold'
-                      : 'bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                  }`}
+                  onClick={() => {
+                    setIsDepositModalOpen(false);
+                    setDepositSuccessInfo(null);
+                  }}
+                  className="w-full h-11 rounded-xl bg-[#22c55e] hover:brightness-110 text-xs font-extrabold text-slate-950 cursor-pointer transition-all"
                 >
-                  R$ {val}
+                  Concluir
                 </button>
-              ))}
-            </div>
-
-            {/* Simulated QR Code Canvas */}
-            <div className="p-4 rounded-2xl bg-white border border-slate-200 w-48 h-48 mx-auto flex items-center justify-center shadow-lg relative">
-              <div className="w-full h-full border-4 border-slate-950 p-2 flex flex-col justify-between">
-                <div className="flex justify-between">
-                  <div className="w-8 h-8 bg-black rounded" />
-                  <div className="w-8 h-8 bg-black rounded" />
-                </div>
-                <div className="text-center font-mono font-bold text-[10px] text-black">
-                  PIX PAREDÃOGK<br/>R$ {depositAmount}
-                </div>
-                <div className="flex justify-between">
-                  <div className="w-8 h-8 bg-black rounded" />
-                  <div className="w-4 h-4 bg-emerald-600 rounded-full mx-auto self-center" />
-                  <div className="w-8 h-8 bg-black rounded" />
-                </div>
               </div>
-            </div>
+            ) : (
+              <>
+                <p className="text-xs text-slate-600 dark:text-slate-400">
+                  Escolha o valor para gerar seu QR Code Pix dinâmico via CajuPay:
+                </p>
 
-            {/* Pix Copia e Cola Code */}
-            <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center justify-between text-left">
-              <div className="truncate text-slate-600 dark:text-slate-400 text-[11px] font-mono pr-2">
-                00020126580014br.gov.bcb.pix0136arenadraft...
-              </div>
-              <button
-                type="button"
-                onClick={copyPixCode}
-                className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-xs font-semibold text-emerald-700 dark:text-emerald-400 flex items-center gap-1 shrink-0 transition-colors cursor-pointer"
-              >
-                {hasCopiedPix ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>{hasCopiedPix ? 'Copiado!' : 'Copiar'}</span>
-              </button>
-            </div>
+                <div className="grid grid-cols-4 gap-2">
+                  {['20.00', '25.00', '30.00', '50.00'].map((val) => (
+                    <button
+                      type="button"
+                      key={val}
+                      disabled={isGeneratingPix || isConfirmingDeposit}
+                      onClick={() => {
+                        setDepositAmount(val);
+                        requestCajuPayPix(val);
+                      }}
+                      className={`py-2 text-xs rounded-xl border font-mono transition-all cursor-pointer disabled:opacity-60 ${
+                        depositAmount === val
+                          ? 'bg-emerald-500/15 dark:bg-emerald-500/20 border-emerald-500 dark:border-emerald-400 text-emerald-700 dark:text-emerald-300 font-bold'
+                          : 'bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      R$ {val}
+                    </button>
+                  ))}
+                </div>
 
-            <button
-              onClick={handleConfirmDeposit}
-              disabled={isConfirmingDeposit}
-              className="w-full h-12 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition-all cursor-pointer"
-            >
-              {isConfirmingDeposit ? (
-                <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
-              ) : (
-                <>
-                  <Check className="w-4 h-4" />
-                  <span>Simular Pagamento Pix Realizado (+R$ {depositAmount})</span>
-                </>
-              )}
-            </button>
+                {pixGenerationError && (
+                  <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-2 text-left">
+                    <span>{pixGenerationError}</span>
+                    <button
+                      type="button"
+                      onClick={() => requestCajuPayPix(depositAmount)}
+                      className="px-2.5 py-1 rounded-lg bg-red-500/20 font-bold shrink-0 cursor-pointer"
+                    >
+                      Tentar novamente
+                    </button>
+                  </div>
+                )}
+
+                {/* Provider & Expiration Strip */}
+                {cajuPixCharge && (
+                  <div className="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-[#22c55e]" />
+                      {cajuPixCharge.provider === 'cajupay'
+                        ? 'CajuPay API Oficial'
+                        : 'CajuPay Pix EMV (Homologação)'}
+                    </span>
+                    <span className="font-mono font-bold text-emerald-700 dark:text-[#22c55e]">
+                      {formatCountdown(pixCountdown)}
+                    </span>
+                  </div>
+                )}
+
+                {/* Real Dynamic QR Code Container */}
+                <div className="p-3 rounded-2xl bg-white border-2 border-slate-200 dark:border-slate-800 w-48 h-48 mx-auto flex items-center justify-center shadow-lg relative overflow-hidden">
+                  {isGeneratingPix ? (
+                    <div className="flex flex-col items-center gap-2 text-slate-600">
+                      <div className="w-7 h-7 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                      <span className="text-[11px] font-mono font-semibold">Gerando Pix CajuPay...</span>
+                    </div>
+                  ) : cajuPixCharge?.qrCodeBase64 ? (
+                    <img
+                      src={cajuPixCharge.qrCodeBase64}
+                      alt={`QR Code Pix CajuPay R$ ${depositAmount}`}
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <div className="text-xs text-slate-500 font-mono p-3">
+                      Selecione um valor acima para gerar o QR Code Pix
+                    </div>
+                  )}
+                </div>
+
+                {/* Pix Copia e Cola Code */}
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center justify-between text-left gap-2">
+                  <div className="truncate text-slate-600 dark:text-slate-400 text-[11px] font-mono select-all flex-1">
+                    {isGeneratingPix
+                      ? 'Gerando código Pix Copia e Cola...'
+                      : cajuPixCharge?.qrCodeText || 'Código Pix indisponível'}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isGeneratingPix || !cajuPixCharge?.qrCodeText}
+                    onClick={copyPixCode}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 shrink-0 transition-colors cursor-pointer disabled:opacity-50 ${
+                      hasCopiedPix
+                        ? 'bg-emerald-500 text-slate-950 font-bold'
+                        : 'bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-emerald-700 dark:text-emerald-400'
+                    }`}
+                  >
+                    {hasCopiedPix ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{hasCopiedPix ? 'Copiado!' : 'Copiar'}</span>
+                  </button>
+                </div>
+
+                {cajuPixCharge && (
+                  <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-ping" />
+                    <span>Aguardando confirmação automática do webhook CajuPay...</span>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleConfirmDeposit}
+                  disabled={isConfirmingDeposit || isGeneratingPix || !cajuPixCharge}
+                  className="w-full h-12 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition-all cursor-pointer disabled:opacity-50"
+                >
+                  {isConfirmingDeposit ? (
+                    <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4" />
+                      <span>Simular Pagamento Pix Realizado (+R$ {depositAmount})</span>
+                    </>
+                  )}
+                </button>
+              </>
+            )}
           </motion.div>
         </div>
       )}

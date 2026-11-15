@@ -1289,7 +1289,7 @@ export async function recordWalletTransactionInSupabase(params: {
   newWalletBalance: number;
   newCashbackBalance?: number;
 }): Promise<{ synced: boolean }> {
-  if (!isSupabaseConfigured || !params.userId) {
+  if (!isSupabaseConfigured || !params.userId || params.userId === 'usr-guest') {
     return { synced: false };
   }
 
@@ -1331,6 +1331,285 @@ export async function recordWalletTransactionInSupabase(params: {
     return { synced: false };
   }
 }
+
+export interface CajuPayPixChargeResponse {
+  success: boolean;
+  provider: 'cajupay' | 'cajupay-sandbox';
+  id: string;
+  status: string;
+  amount: number;
+  houseFee: number;
+  goalkeeperNet: number;
+  qrCodeText: string;
+  qrCodeBase64: string | null;
+  expiresAt: string;
+  idempotencyKey?: string;
+  publicKeyConfigured?: boolean;
+  note?: string;
+  error?: string;
+}
+
+/**
+ * Chama o backend integrado à API CajuPay utilizando VITE_CAJUPAY_PUBLIC_KEY e CAJUPAY_SECRET_KEY
+ * para gerar QR Code dinâmico real e código Pix Copia e Cola.
+ */
+export async function generateCajuPayPixCharge(params: {
+  amount: number;
+  userId?: string;
+  description?: string;
+  matchId?: string;
+  type?: 'wallet_deposit' | 'match_booking';
+  customer?: {
+    name?: string;
+    email?: string;
+    cpf?: string;
+    phone?: string;
+  };
+}): Promise<CajuPayPixChargeResponse> {
+  const publicKey = import.meta.env.VITE_CAJUPAY_PUBLIC_KEY || '';
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (publicKey && !publicKey.startsWith('MY_') && !publicKey.includes('placeholder')) {
+    headers['X-CajuPay-Public-Key'] = publicKey;
+  }
+
+  const response = await fetch('/api/gerar-pix-caju', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      amount: params.amount,
+      valor: params.amount,
+      userId: params.userId && params.userId !== 'usr-guest' ? params.userId : undefined,
+      type: params.type || 'wallet_deposit',
+      matchId: params.matchId,
+      description: params.description || `Recarga Carteira Digital ParedãoGK - R$ ${params.amount.toFixed(2)}`,
+      customer: params.customer,
+    }),
+  });
+
+  const data = await response.json();
+  if (!response.ok || !data?.success) {
+    throw new Error(data?.error || 'Falha ao gerar cobrança Pix no CajuPay.');
+  }
+  return data as CajuPayPixChargeResponse;
+}
+
+/**
+ * Consulta status de confirmação da cobrança Pix CajuPay (atualizado pelo webhook /api/webhook-caju).
+ */
+export async function checkCajuPayPaymentStatus(paymentId: string): Promise<{
+  status: 'pending' | 'completed' | 'failed';
+  receiptCode?: string;
+  supabaseCredited?: boolean;
+}> {
+  try {
+    const res = await fetch(`/api/cajupay/payment-status/${encodeURIComponent(paymentId)}`);
+    if (!res.ok) return { status: 'pending' };
+    const json = await res.json();
+    return {
+      status: json?.charge?.status || 'pending',
+      receiptCode: json?.charge?.receiptCode,
+      supabaseCredited: Boolean(json?.charge?.supabaseCredited),
+    };
+  } catch {
+    return { status: 'pending' };
+  }
+}
+
+/**
+ * Dispara simulação homologada de webhook payment.confirmed assinado com HMAC-SHA256 no servidor.
+ */
+export async function simulateCajuPayWebhookConfirmation(params: {
+  paymentId: string;
+  amount: number;
+  userId?: string;
+  description?: string;
+}): Promise<{
+  success: boolean;
+  paymentId: string;
+  amount: number;
+  receiptCode: string;
+  supabaseCredited: boolean;
+  newWalletBalance?: number;
+}> {
+  const res = await fetch('/api/cajupay/simulate-webhook', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      paymentId: params.paymentId,
+      amount: params.amount,
+      userId: params.userId && params.userId !== 'usr-guest' ? params.userId : undefined,
+      description: params.description,
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data?.success) {
+    throw new Error(data?.error || 'Falha ao confirmar pagamento via webhook CajuPay.');
+  }
+
+  return {
+    success: true,
+    paymentId: String(data.paymentId || params.paymentId),
+    amount: Number(data.amount || params.amount),
+    receiptCode: String(data.receiptCode || `CAJU-${Date.now().toString().slice(-6)}`),
+    supabaseCredited: Boolean(data.supabaseCredited),
+    newWalletBalance: typeof data.newWalletBalance === 'number' ? data.newWalletBalance : undefined,
+  };
+}
+
+/**
+ * Persiste permanentemente o crédito Pix na tabela 'wallet_transactions' e atualiza
+ * 'profiles.wallet_balance' no Supabase de forma idempotente (evita crédito duplicado).
+ */
+export async function creditWalletDepositInSupabase(params: {
+  userId: string;
+  paymentId: string;
+  amount: number;
+  receiptCode: string;
+  description?: string;
+  fallbackCurrentBalance?: number;
+}): Promise<{
+  synced: boolean;
+  newWalletBalance: number;
+  transaction: Transaction;
+  alreadyCredited?: boolean;
+  errorMessage?: string;
+}> {
+  const txId = `tx-caju-${params.paymentId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  const transaction: Transaction = {
+    id: txId,
+    type: 'pix_in',
+    amount: params.amount,
+    description: params.description || 'Recarga Pix CajuPay Instantânea',
+    date: new Date().toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }),
+    status: 'completed',
+    receiptCode: params.receiptCode,
+    provider: 'cajupay',
+  };
+
+  if (!isSupabaseConfigured || !params.userId || params.userId === 'usr-guest') {
+    const localBalance = Number(((params.fallbackCurrentBalance || 0) + params.amount).toFixed(2));
+    return {
+      synced: false,
+      newWalletBalance: localBalance,
+      transaction,
+      errorMessage: 'Usuário não autenticado no Supabase.',
+    };
+  }
+
+  try {
+    // 1. Verificar idempotência (caso o webhook server-side já tenha creditado)
+    const [{ data: existingTx }, { data: profileRow, error: profileReadErr }] = await Promise.all([
+      supabase
+        .from('wallet_transactions')
+        .select('id, status')
+        .eq('id', txId)
+        .maybeSingle(),
+      supabase
+        .from('profiles')
+        .select('wallet_balance')
+        .eq('id', params.userId)
+        .maybeSingle(),
+    ]);
+
+    if (profileReadErr) {
+      throw new Error(profileReadErr.message);
+    }
+
+    const currentDbBalance = Number(
+      profileRow?.wallet_balance ?? params.fallbackCurrentBalance ?? 0
+    );
+
+    if (existingTx && existingTx.status === 'completed') {
+      return {
+        synced: true,
+        alreadyCredited: true,
+        newWalletBalance: Number(currentDbBalance.toFixed(2)),
+        transaction,
+      };
+    }
+
+    const updatedBalance = Number((currentDbBalance + params.amount).toFixed(2));
+    const nowIso = new Date().toISOString();
+
+    const { error: txErr } = await supabase.from('wallet_transactions').upsert([
+      {
+        id: txId,
+        user_id: params.userId,
+        type: 'pix_in',
+        amount: params.amount,
+        description: transaction.description,
+        status: 'completed',
+        receipt_code: params.receiptCode,
+        provider: 'cajupay',
+        created_at: nowIso,
+      },
+    ]);
+
+    if (txErr) {
+      throw new Error(txErr.message);
+    }
+
+    const { error: profErr } = await supabase
+      .from('profiles')
+      .update({
+        wallet_balance: updatedBalance,
+        updated_at: nowIso,
+      })
+      .eq('id', params.userId);
+
+    if (profErr) {
+      throw new Error(profErr.message);
+    }
+
+    return {
+      synced: true,
+      newWalletBalance: updatedBalance,
+      transaction,
+    };
+  } catch (err: any) {
+    console.warn('[Supabase creditWalletDepositInSupabase Error]', err);
+    return {
+      synced: false,
+      newWalletBalance: Number(((params.fallbackCurrentBalance || 0) + params.amount).toFixed(2)),
+      transaction,
+      errorMessage: err?.message || 'Erro ao persistir saldo no Supabase.',
+    };
+  }
+}
+
+/**
+ * Escuta alterações em tempo real na carteira do usuário logado no Supabase (profiles + wallet_transactions).
+ */
+export function subscribeToUserWalletRealtime(
+  userId: string,
+  onWalletUpdated: () => void
+) {
+  if (!isSupabaseConfigured || !userId || userId === 'usr-guest') {
+    return () => {};
+  }
+
+  const channel = supabase
+    .channel(`paredaogk-wallet-${userId}`)
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${userId}` },
+      () => onWalletUpdated()
+    )
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'wallet_transactions', filter: `user_id=eq.${userId}` },
+      () => onWalletUpdated()
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 
 /**
  * Atualiza o cachê base sugerido, nível técnico e preferências no perfil do atleta no Supabase.
