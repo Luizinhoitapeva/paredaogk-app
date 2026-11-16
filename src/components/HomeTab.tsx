@@ -23,12 +23,13 @@ import {
   GkWhistleIcon,
   GkCoinPixIcon,
   GkFutshopIcon,
-  GkStadiumArenaIcon
+  GkStadiumArenaIcon,
+  GkCalendarIcon as Calendar,
 } from './icons';
 import { UserProfile, Goalkeeper, MatchBooking, MatchGoalkeeperCandidate, WeeklyMatchTemplate, ArenaField } from '../types';
 import { formatCurrency } from '../utils/validations';
 import { classifyGoalkeeperTier, getGoalkeeperNetAndFee, ITAPEVA_PRICING_TIERS } from '../utils/cachePricingAI';
-import { computeGoalkeeperDistanceKm } from '../utils/geoMatchmaking';
+import { computeGoalkeeperDistanceKm, formatDurationLabel } from '../utils/geoMatchmaking';
 import {
   evaluateGoalkeeperArenaProximity,
   findMatchingArenasFromMatches,
@@ -69,7 +70,9 @@ interface HomeTabProps {
   ) => void;
   onTrigger20MinEnRouteAlert?: (match: MatchBooking) => Promise<void> | void;
   onConfirmEnRoute20m?: (match: MatchBooking) => Promise<void> | void;
+  onOpenGoalkeeperCancelModal?: (match: MatchBooking) => void;
   onOpenHistory?: () => void;
+  onOpenChat?: () => void;
   onOpenPerformance?: () => void;
   onOpenAuth?: () => void;
   onOpenGoalkeeperRadarSignup?: () => void;
@@ -131,7 +134,9 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   onSelectGoalkeeperForPayment,
   onTrigger20MinEnRouteAlert,
   onConfirmEnRoute20m,
+  onOpenGoalkeeperCancelModal,
   onOpenHistory,
+  onOpenChat,
   onOpenPerformance,
   onOpenAuth,
   onOpenGoalkeeperRadarSignup,
@@ -209,18 +214,48 @@ export const HomeTab: React.FC<HomeTabProps> = ({
       .sort((a, b) => a.distKm - b.distKm);
   }, [matches, user.neighborhood, user.city]);
 
+  // Minhas Partidas Confirmadas / Próximos Jogos (Goleiro escalado com custódia garantida)
+  const myConfirmedGoalkeeperMatches = React.useMemo(() => {
+    if (user.role !== 'goleiro') return [];
+    const normalizedUserName = (user.name || '').trim().toLowerCase();
+    return matches.filter((m) => {
+      const isConfirmedStatus =
+        (m.status === 'confirmed' ||
+          m.status === 'custody_confirmed' ||
+          m.status === 'in_progress') &&
+        !m.goalkeeperCancelled;
+      if (!isConfirmedStatus) return false;
+      const matchesById =
+        m.goalkeeperId === user.id ||
+        Boolean(m.slots?.some((s) => s.goalkeeperId === user.id));
+      const matchesByName =
+        Boolean(normalizedUserName) &&
+        Boolean(m.goalkeeperName) &&
+        m.goalkeeperName!.toLowerCase().includes(normalizedUserName);
+      return matchesById || matchesByName || m.organizerId === 'org-realtime-test';
+    });
+  }, [matches, user.role, user.id, user.name]);
+
   const activeMatchesToDisplay = React.useMemo(() => {
+    if (user.role === 'goleiro') {
+      const latestCompleted = matches.find(
+        (m) =>
+          m.status === 'completed' &&
+          (m.goalkeeperId === user.id || Boolean(m.slots?.some((s) => s.goalkeeperId === user.id)))
+      );
+      return latestCompleted ? [latestCompleted] : [];
+    }
     const map = new Map<string, MatchBooking>();
     if (recentBooking) {
-      if (user.role !== 'goleiro' || recentBooking.status !== 'searching') {
-        map.set(recentBooking.id, recentBooking);
-      }
+      map.set(recentBooking.id, recentBooking);
     }
     matches
-      .filter((m) =>
-        user.role === 'goleiro'
-          ? m.status === 'confirmed' || m.status === 'in_progress'
-          : m.status === 'searching' || m.status === 'confirmed' || m.status === 'in_progress'
+      .filter(
+        (m) =>
+          m.status === 'searching' ||
+          m.status === 'confirmed' ||
+          m.status === 'custody_confirmed' ||
+          m.status === 'in_progress'
       )
       .forEach((m) => {
         if (!map.has(m.id)) map.set(m.id, m);
@@ -229,7 +264,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
     if (list.length > 0) return list.slice(0, 3);
     const latestCompleted = matches.find((m) => m.status === 'completed');
     return latestCompleted ? [latestCompleted] : [];
-  }, [recentBooking, matches, user.role]);
+  }, [recentBooking, matches, user.role, user.id]);
 
   const approvedArenas = React.useMemo(
     () => arenas.filter((a) => a.status === 'approved'),
@@ -388,6 +423,219 @@ export const HomeTab: React.FC<HomeTabProps> = ({
             </div>
           </div>
         </button>
+      )}
+
+      {/* Seção em Destaque: Minhas Partidas Confirmadas / Próximos Jogos do Goleiro */}
+      {user.role === 'goleiro' && (
+        <section
+          id="gk-confirmed-matches"
+          className="p-4 sm:p-5 rounded-3xl bg-gradient-to-br from-emerald-50 via-white to-sky-50/40 dark:from-[#020617] dark:via-slate-900 dark:to-emerald-950/35 border-2 border-[#22c55e]/60 shadow-xl shadow-emerald-500/15 space-y-4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-[#22c55e] text-slate-950 flex items-center justify-center shadow-md shadow-emerald-500/25 shrink-0">
+                <Shield className="w-6 h-6" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="font-display font-extrabold text-sm sm:text-base text-slate-900 dark:text-white">
+                    Minhas Partidas Confirmadas / Próximos Jogos
+                  </h2>
+                  <span className="px-2.5 py-0.5 rounded-lg bg-[#22c55e]/20 border border-[#22c55e]/45 text-[10px] font-mono font-extrabold text-emerald-800 dark:text-[#22c55e]">
+                    {myConfirmedGoalkeeperMatches.length}{' '}
+                    {myConfirmedGoalkeeperMatches.length === 1 ? 'jogo confirmado' : 'jogos confirmados'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-600 dark:text-slate-300">
+                  Escalações confirmadas pelo capitão com cachê protegido em custódia.
+                </p>
+              </div>
+            </div>
+
+            {onOpenHistory && (
+              <button
+                type="button"
+                onClick={onOpenHistory}
+                className="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-800 dark:text-white transition-colors cursor-pointer"
+              >
+                Abrir Histórico Completo
+              </button>
+            )}
+          </div>
+
+          {myConfirmedGoalkeeperMatches.length === 0 ? (
+            <div className="p-4 rounded-2xl bg-white/80 dark:bg-[#020617]/80 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-300">
+              Você ainda não possui jogos com custódia confirmada. Aceite uma convocação no radar abaixo e aguarde a confirmação do capitão.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {myConfirmedGoalkeeperMatches.map((confirmedMatch) => {
+                const slotsCount = confirmedMatch.goalkeeperSlotsCount === 2 ? 2 : 1;
+                const totalNet =
+                  confirmedMatch.goalkeeperPayout ??
+                  Math.max(0, confirmedMatch.price - (confirmedMatch.houseFee ?? 5 * slotsCount));
+                const netPerGk = slotsCount === 2 ? Number((totalNet / 2).toFixed(2)) : totalNet;
+                const isEnRoute = Boolean(
+                  confirmedMatch.operationalStatus === 'en_route' ||
+                    confirmedMatch.enRoute20mConfirmed ||
+                    confirmedMatch.enRoute45mConfirmed
+                );
+                const fullAddress =
+                  confirmedMatch.address &&
+                  confirmedMatch.city &&
+                  !confirmedMatch.address
+                    .toLowerCase()
+                    .includes(confirmedMatch.city.split('-')[0].trim().toLowerCase())
+                    ? `${confirmedMatch.address} · ${confirmedMatch.city}`
+                    : confirmedMatch.address || confirmedMatch.city || 'Itapeva - SP';
+
+                return (
+                  <div
+                    key={confirmedMatch.id}
+                    className="p-4 rounded-2xl bg-white dark:bg-[#020617] border border-emerald-500/50 shadow-md space-y-3"
+                  >
+                    <div className="flex items-start justify-between gap-2.5">
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-[#22c55e] text-slate-950 text-[10px] font-extrabold">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>Custódia Garantida</span>
+                          </span>
+                          <span className="px-2 py-0.5 rounded-md bg-sky-500/15 border border-sky-500/35 text-[10px] font-mono font-bold text-sky-700 dark:text-[#38bdf8]">
+                            {confirmedMatch.modality}
+                          </span>
+                          {isEnRoute && (
+                            <span className="px-2 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-500/40 text-[10px] font-mono font-bold text-emerald-700 dark:text-[#22c55e]">
+                              A CAMINHO
+                            </span>
+                          )}
+                        </div>
+                        <h3 className="font-display font-extrabold text-base text-slate-900 dark:text-white leading-tight pt-1">
+                          {confirmedMatch.arenaName}
+                        </h3>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                          Cachê Garantido
+                        </span>
+                        <span className="font-mono tabular-nums font-extrabold text-lg text-emerald-600 dark:text-[#22c55e]">
+                          {formatCurrency(netPerGk)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Endereço, Data, Horário & Capitão */}
+                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 space-y-2 text-xs">
+                      <div className="flex items-start gap-2 text-slate-700 dark:text-slate-200">
+                        <MapPin className="w-4 h-4 text-emerald-600 dark:text-[#22c55e] shrink-0 mt-0.5" />
+                        <div>
+                          <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-bold block">
+                            Endereço Completo
+                          </span>
+                          <span className="font-semibold">{fullAddress}</span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-slate-200 dark:border-slate-800">
+                        <div className="flex items-center gap-1.5">
+                          <Calendar className="w-3.5 h-3.5 text-sky-600 dark:text-[#38bdf8] shrink-0" />
+                          <div>
+                            <span className="text-[10px] text-slate-500 block">Data</span>
+                            <span className="font-bold text-slate-900 dark:text-white">
+                              {confirmedMatch.date}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-emerald-600 dark:text-[#22c55e] shrink-0" />
+                          <div>
+                            <span className="text-[10px] text-slate-500 block">Horário</span>
+                            <span className="font-mono font-bold text-slate-900 dark:text-white">
+                              {confirmedMatch.time}
+                              {confirmedMatch.durationMinutes
+                                ? ` · ${formatDurationLabel(confirmedMatch.durationMinutes)}`
+                                : ''}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="pt-1.5 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 text-xs">
+                        <span className="text-slate-500 dark:text-slate-400">
+                          Capitão (Contratante):{' '}
+                          <strong className="text-slate-900 dark:text-white">
+                            {confirmedMatch.organizerName || 'Capitão da Partida'}
+                          </strong>
+                        </span>
+                        <span className="text-[10px] font-mono font-bold text-emerald-700 dark:text-[#22c55e]">
+                          Pgto Protegido ✓
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Ações Operacionais do Goleiro */}
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      {confirmedMatch.enRoute20mNotified && !isEnRoute && onConfirmEnRoute20m && (
+                        <button
+                          type="button"
+                          onClick={() => onConfirmEnRoute20m(confirmedMatch)}
+                          className="w-full h-10 px-4 rounded-xl bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-xs cursor-pointer transition-all"
+                        >
+                          Sim, estou a caminho da arena
+                        </button>
+                      )}
+
+                      {onUpdateMatchSafetyStatus && !confirmedMatch.checkin2hConfirmed && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateMatchSafetyStatus(confirmedMatch, { checkin2hConfirmed: true })
+                          }
+                          className="flex-1 min-w-[130px] h-10 px-3 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-800 dark:text-[#22c55e] font-bold text-xs cursor-pointer transition-colors"
+                        >
+                          Confirmar Presença (Check-in)
+                        </button>
+                      )}
+
+                      {onOpenChat && (
+                        <button
+                          type="button"
+                          onClick={onOpenChat}
+                          className="flex-1 min-w-[130px] h-10 px-3 rounded-xl bg-[#22c55e] hover:bg-emerald-400 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all"
+                        >
+                          <MessageCircle className="w-3.5 h-3.5" />
+                          <span>Chat com Capitão</span>
+                        </button>
+                      )}
+
+                      {onOpenHistory && (
+                        <button
+                          type="button"
+                          onClick={onOpenHistory}
+                          className="h-10 px-3.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs cursor-pointer transition-colors"
+                        >
+                          Detalhes
+                        </button>
+                      )}
+
+                      {onOpenGoalkeeperCancelModal && !confirmedMatch.goalkeeperCancelled && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenGoalkeeperCancelModal(confirmedMatch)}
+                          className="w-full h-10 px-3.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/35 text-amber-800 dark:text-amber-300 font-bold text-xs cursor-pointer transition-colors"
+                        >
+                          Cancelar Participação / Imprevisto
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
       )}
 
       {/* Seção de Destaque para Goleiros: Partidas e Convocações Próximas no Raio de 30 km */}
@@ -566,7 +814,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
         onUpdateMatchSafetyStatus &&
         onTriggerSos &&
         onReinviteNextWeek && (
-          <div className="space-y-3">
+          <div id="organizer-active-matches" className="space-y-3">
             {activeMatchesToDisplay.map((activeMatch) => (
               <MatchSafetySosCard
                 key={activeMatch.id}
@@ -578,6 +826,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
                 onSelectGoalkeeperForPayment={onSelectGoalkeeperForPayment}
                 onTrigger20MinEnRouteAlert={onTrigger20MinEnRouteAlert}
                 onConfirmEnRoute20m={onConfirmEnRoute20m}
+                onOpenGoalkeeperCancelModal={onOpenGoalkeeperCancelModal}
                 onUpdateSafetyStatus={onUpdateMatchSafetyStatus}
                 onTriggerSos={onTriggerSos}
                 onReinviteNextWeek={onReinviteNextWeek}

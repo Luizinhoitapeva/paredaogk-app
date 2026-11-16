@@ -27,6 +27,7 @@ interface MatchSafetySosCardProps {
   ) => void;
   onTrigger20MinEnRouteAlert?: (match: MatchBooking) => Promise<void> | void;
   onConfirmEnRoute20m?: (match: MatchBooking) => Promise<void> | void;
+  onOpenGoalkeeperCancelModal?: (match: MatchBooking) => void;
   onUpdateSafetyStatus: (
     match: MatchBooking,
     updates: {
@@ -55,6 +56,7 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
   onSelectGoalkeeperForPayment,
   onTrigger20MinEnRouteAlert,
   onConfirmEnRoute20m,
+  onOpenGoalkeeperCancelModal,
   onUpdateSafetyStatus,
   onTriggerSos,
   onReinviteNextWeek,
@@ -164,6 +166,8 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
               <span className="text-xs font-extrabold text-slate-900 dark:text-white">
                 {match.status === 'completed'
                   ? 'Partida Concluída'
+                  : match.goalkeeperCancelled
+                  ? 'Goleiro Cancelou · Vaga Reaberta no Radar 30 km'
                   : isEnRoute
                   ? 'Goleiro A Caminho da Arena!'
                   : isSosActive
@@ -172,8 +176,6 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
                   ? `${candidates.length} Goleiro(s) Aceitou · Selecione para Pagar Custódia`
                   : isAwaitingAcceptance
                   ? `Aguardando Aceite / No Radar (${match.radiusKm || 30} km)`
-                  : match.goalkeeperCancelled
-                  ? 'Goleiro Não Confirmou / Cancelou'
                   : 'Convocação Confirmada!'}
               </span>
 
@@ -217,6 +219,33 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
           </span>
         </div>
       </div>
+
+      {/* ALERTA DE CANCELAMENTO PELO GOLEIRO COM JUSTIFICATIVA */}
+      {match.goalkeeperCancelled && match.status !== 'completed' && (
+        <div className="p-3.5 rounded-2xl bg-amber-500/15 border border-amber-500/50 space-y-1.5 text-xs">
+          <div className="font-extrabold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+            <SosAlert className="w-4 h-4 shrink-0" />
+            <span>
+              {match.previousGoalkeeperName
+                ? `O goleiro ${match.previousGoalkeeperName} cancelou a participação`
+                : 'Goleiro cancelou a participação'}
+            </span>
+          </div>
+          {match.goalkeeperCancelReason && (
+            <div className="text-slate-800 dark:text-slate-100">
+              <span className="font-semibold">Motivo informado:</span> {match.goalkeeperCancelReason}
+            </div>
+          )}
+          {match.goalkeeperCancelDetails && (
+            <div className="text-[11px] text-slate-700 dark:text-slate-300">
+              <span className="font-semibold">Detalhes:</span> {match.goalkeeperCancelDetails}
+            </div>
+          )}
+          <div className="text-[11px] font-semibold text-emerald-700 dark:text-[#22c55e]">
+            A vaga foi reaberta automaticamente no radar de {match.radiusKm || 30} km com proteção de custódia.
+          </div>
+        </div>
+      )}
 
       {/* PROMPT ATIVO 20 MINUTOS ANTES: "Você está a caminho do jogo em [Local]?" */}
       {show20MinPrompt && onConfirmEnRoute20m && (
@@ -475,19 +504,26 @@ export const MatchSafetySosCard: React.FC<MatchSafetySosCardProps> = ({
                 </button>
               )}
 
-              {!match.goalkeeperCancelled && !isSosActive && (
+              {!match.goalkeeperCancelled &&
+                (userRole === 'goleiro' || !isSosActive) && (
                 <button
                   type="button"
-                  onClick={() =>
-                    onUpdateSafetyStatus(match, {
-                      goalkeeperCancelled: true,
-                      checkin2hConfirmed: false,
-                      enRoute45mConfirmed: false,
-                    })
-                  }
-                  className="px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-amber-500/15 border border-slate-200 dark:border-slate-700 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:text-amber-600 dark:hover:text-amber-400 cursor-pointer transition-colors"
+                  onClick={() => {
+                    if (userRole === 'goleiro' && onOpenGoalkeeperCancelModal) {
+                      onOpenGoalkeeperCancelModal(match);
+                    } else {
+                      onUpdateSafetyStatus(match, {
+                        goalkeeperCancelled: true,
+                        checkin2hConfirmed: false,
+                        enRoute45mConfirmed: false,
+                      });
+                    }
+                  }}
+                  className="px-3 py-1.5 min-h-[36px] rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-amber-500/15 border border-slate-200 dark:border-slate-700 text-[11px] font-bold text-slate-700 dark:text-slate-200 hover:text-amber-600 dark:hover:text-amber-400 cursor-pointer transition-colors"
                 >
-                  {userRole === 'contratante' ? 'Reportar Atraso / Falta' : 'Simular Cancelamento'}
+                  {userRole === 'contratante'
+                    ? 'Reportar Atraso / Falta'
+                    : 'Cancelar Participação / Imprevisto'}
                 </button>
               )}
             </div>

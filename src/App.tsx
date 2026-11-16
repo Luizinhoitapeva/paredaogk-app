@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { UserProfile, UserRole, TabType, MatchBooking, MatchGoalkeeperCandidate, Goalkeeper, Conversation, ChatMessage, WeeklyMatchTemplate, PostMatchAiFeedbackResult, Transaction, WalletDashboardSummary, ArenaField } from './types';
+import { UserProfile, UserRole, TabType, MatchBooking, MatchGoalkeeperCandidate, Goalkeeper, Conversation, ChatMessage, WeeklyMatchTemplate, PostMatchAiFeedbackResult, Transaction, WalletDashboardSummary, ArenaField, NotificationItem } from './types';
 import {
   INITIAL_USER,
   INITIAL_ITAPEVA_ARENAS,
@@ -17,12 +17,16 @@ import {
   seedAndFetchArenasFromSupabase,
   fetchMatchesFromSupabase,
   fetchOpenRadarMatches,
+  fetchGoalkeeperConfirmedMatches,
+  formatEscalationConfirmationMessage,
   fetchAdminPixWithdrawalsFromSupabase,
   fetchOrCreateSupabaseProfile,
   isAuthorizedAdmin,
   acceptMatchVacancyInSupabase,
   trigger20MinEnRouteNotificationInSupabase,
   confirmGoalkeeperEnRoute20mInSupabase,
+  cancelGoalkeeperParticipationInSupabase,
+  formatGoalkeeperCancellationMessage,
 } from './lib/supabaseClient';
 import { shouldTrigger20MinEnRouteAlert } from './utils/geoMatchmaking';
 import { OnboardingCarousel } from './components/OnboardingCarousel';
@@ -42,6 +46,7 @@ import { FutshopModal } from './components/FutshopModal';
 import { HelpFaqModal } from './components/HelpFaqModal';
 import { TermsModal } from './components/TermsModal';
 import { GoalkeeperCallAlertModal } from './components/GoalkeeperCallAlertModal';
+import { GoalkeeperCancelModal } from './components/GoalkeeperCancelModal';
 import { GoalkeeperPerformanceDashboard } from './components/GoalkeeperPerformanceDashboard';
 import { AvatarSelectionModal } from './components/AvatarSelectionModal';
 import { ProfilePricingModal } from './components/ProfilePricingModal';
@@ -199,11 +204,20 @@ export default function App() {
   const [matches, setMatches] = useState<MatchBooking[]>([]);
   const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
   const [selectedMatchForReview, setSelectedMatchForReview] = useState<MatchBooking | null>(null);
+  const [cancelModalMatch, setCancelModalMatch] = useState<MatchBooking | null>(null);
 
   // Active bookings & counts (clean zero starting state)
   const [recentBooking, setRecentBooking] = useState<MatchBooking | null>(null);
   const [unreadMessages, setUnreadMessages] = useState(0);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [localNotifications, setLocalNotifications] = useState<NotificationItem[]>([]);
+  const [pushToastBanner, setPushToastBanner] = useState<{
+    id: string;
+    title: string;
+    description: string;
+    matchId?: string;
+    variant?: 'confirmation' | 'cancellation';
+  } | null>(null);
   const [confirmationBanner, setConfirmationBanner] = useState<string | null>(null);
 
   // Pelada Recorrente (Modelos Semanais) & Elenco Fixo (Favoritos)
@@ -342,18 +356,21 @@ export default function App() {
     }).then(({ synced }) => setIsRetentionSynced(synced));
   }, [weeklyTemplates, favoriteGoalkeeperIds, currentUser.id]);
 
-  // Sincronização de partidas oficiais do usuário + partidas abertas no radar (30 km)
+  // Sincronização de partidas oficiais do usuário + partidas abertas no radar (30 km) + escalações confirmadas do goleiro
   const handleRefreshRadarMatches = async () => {
     setIsRefreshingRadar(true);
     try {
-      const [remoteMatches, openRadarMatches] = await Promise.all([
+      const [remoteMatches, openRadarMatches, confirmedGkMatches] = await Promise.all([
         currentUser.id && currentUser.id !== 'usr-guest'
-          ? fetchMatchesFromSupabase(currentUser.id)
+          ? fetchMatchesFromSupabase(currentUser.id, currentUser.name)
           : Promise.resolve([]),
         fetchOpenRadarMatches(),
+        currentUser.id && currentUser.id !== 'usr-guest'
+          ? fetchGoalkeeperConfirmedMatches(currentUser.id, currentUser.name)
+          : Promise.resolve([]),
       ]);
 
-      const incoming = [...openRadarMatches, ...remoteMatches];
+      const incoming = [...openRadarMatches, ...confirmedGkMatches, ...remoteMatches];
       if (incoming.length > 0) {
         setMatches((prev) => {
           const map = new Map<string, MatchBooking>();
@@ -471,10 +488,219 @@ export default function App() {
     [arenas]
   );
 
+  const triggerNativeEscalationNotification = (params: {
+    id?: string;
+    matchId?: string;
+    arenaName?: string;
+    title?: string;
+    description?: string;
+    showPushToast?: boolean;
+  }) => {
+    const desc =
+      params.description || formatEscalationConfirmationMessage(params.arenaName);
+    const title =
+      params.title ||
+      `🛡️ Escalação Confirmada · ${params.arenaName || 'Arena ParedãoGK'}`;
+    const notifId = params.id || `notif-esc-${params.matchId || Date.now()}`;
+
+    const item: NotificationItem = {
+      id: notifId,
+      title,
+      description: desc,
+      timestamp: new Date().toLocaleString('pt-BR', {
+        dateStyle: 'short',
+        timeStyle: 'short',
+      }),
+      read: false,
+      category: 'match',
+      actionTab: 'home',
+      matchId: params.matchId,
+      arenaName: params.arenaName,
+      actionType: 'view_confirmed_match',
+    };
+
+    setLocalNotifications((prev) => {
+      const filtered = prev.filter((n) => n.id !== item.id);
+      return [item, ...filtered];
+    });
+    setUnreadNotifications((prev) => prev + 1);
+
+    if (params.showPushToast !== false) {
+      setPushToastBanner({
+        id: notifId,
+        title,
+        description: desc,
+        matchId: params.matchId,
+        variant: 'confirmation',
+      });
+
+      if (
+        typeof window !== 'undefined' &&
+        'Notification' in window &&
+        window.Notification.permission === 'granted'
+      ) {
+        try {
+          new window.Notification(title, { body: desc });
+        } catch {
+          // ignore notification API errors inside iframe
+        }
+      }
+    }
+  };
+
+  const triggerGoalkeeperCancelledNotification = (params: {
+    id?: string;
+    matchId?: string;
+    arenaName?: string;
+    goalkeeperName?: string;
+    reason?: string;
+    title?: string;
+    description?: string;
+    showPushToast?: boolean;
+  }) => {
+    const desc =
+      params.description ||
+      formatGoalkeeperCancellationMessage(params.goalkeeperName, params.reason);
+    const title =
+      params.title ||
+      `⚠️ Goleiro Cancelou Participação · ${params.arenaName || 'Arena ParedãoGK'}`;
+    const notifId = params.id || `notif-gk-cancel-${params.matchId || Date.now()}`;
+
+    const item: NotificationItem = {
+      id: notifId,
+      title,
+      description: desc,
+      timestamp: new Date().toLocaleString('pt-BR', {
+        dateStyle: 'short',
+        timeStyle: 'short',
+      }),
+      read: false,
+      category: 'match',
+      actionTab: 'home',
+      matchId: params.matchId,
+      arenaName: params.arenaName,
+      actionType: 'view_cancelled_match',
+    };
+
+    setLocalNotifications((prev) => {
+      const filtered = prev.filter((n) => n.id !== item.id);
+      return [item, ...filtered];
+    });
+    setUnreadNotifications((prev) => prev + 1);
+
+    if (params.showPushToast !== false) {
+      setPushToastBanner({
+        id: notifId,
+        title,
+        description: desc,
+        matchId: params.matchId,
+        variant: 'cancellation',
+      });
+
+      if (
+        typeof window !== 'undefined' &&
+        'Notification' in window &&
+        window.Notification.permission === 'granted'
+      ) {
+        try {
+          new window.Notification(title, { body: desc });
+        } catch {
+          // ignore notification API errors inside iframe
+        }
+      }
+    }
+  };
+
+  const navigateToConfirmedMatchDetails = () => {
+    setCurrentTab('home');
+    setPushToastBanner(null);
+    if (typeof window !== 'undefined') {
+      setTimeout(() => {
+        const el = document.getElementById('gk-confirmed-matches');
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 120);
+    }
+  };
+
+  const navigateToCancelledMatchDetails = () => {
+    setCurrentTab('home');
+    setPushToastBanner(null);
+    if (typeof window !== 'undefined') {
+      setTimeout(() => {
+        const el = document.getElementById('organizer-active-matches');
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 120);
+    }
+  };
+
   // Supabase Realtime: Escuta instantânea nas tabelas notifications, matches e canal de broadcast Mercado Pago
   useEffect(() => {
     const unsubscribeRealtime = subscribeToRealtimeBookingsAndNotifications({
-      onNotification: () => {
+      onNotification: (newRecord) => {
+        const activeUser = currentUserRef.current;
+        if (
+          newRecord?.user_id &&
+          activeUser.id &&
+          activeUser.id !== 'usr-guest' &&
+          newRecord.user_id !== activeUser.id
+        ) {
+          return;
+        }
+        const descText = String(newRecord?.description || '');
+        const titleText = String(newRecord?.title || 'Nova Notificação ParedãoGK');
+        const isEscalationConfirmation =
+          newRecord?.action_type === 'view_confirmed_match' ||
+          descText.toLowerCase().includes('escalação') ||
+          titleText.toLowerCase().includes('escalação confirmada');
+        const isGoalkeeperCancellation =
+          newRecord?.action_type === 'view_cancelled_match' ||
+          descText.toLowerCase().includes('cancelou a participação') ||
+          titleText.toLowerCase().includes('cancelou participação');
+
+        if (isEscalationConfirmation) {
+          triggerNativeEscalationNotification({
+            id: newRecord?.id,
+            matchId: newRecord?.match_id,
+            arenaName: newRecord?.arena_name,
+            title: titleText,
+            description: descText,
+            showPushToast: activeUser.role === 'goleiro' || newRecord?.user_id === activeUser.id,
+          });
+          return;
+        }
+
+        if (isGoalkeeperCancellation) {
+          triggerGoalkeeperCancelledNotification({
+            id: newRecord?.id,
+            matchId: newRecord?.match_id,
+            arenaName: newRecord?.arena_name,
+            title: titleText,
+            description: descText,
+            showPushToast:
+              activeUser.role === 'contratante' ||
+              (Boolean(newRecord?.user_id) && newRecord?.user_id === activeUser.id),
+          });
+          return;
+        }
+
+        if (newRecord?.id) {
+          setLocalNotifications((prev) => [
+            {
+              id: String(newRecord.id),
+              title: titleText,
+              description: descText,
+              timestamp: 'Agora',
+              read: false,
+              category: (newRecord.category || 'match') as NotificationItem['category'],
+              actionTab: 'home',
+            },
+            ...prev.filter((n) => n.id !== String(newRecord.id)),
+          ]);
+        }
         setUnreadNotifications((prev) => prev + 1);
       },
       onMatchChange: (matchRecord) => {
@@ -525,14 +751,24 @@ export default function App() {
           radiusKm: callData.radiusKm ? Number(callData.radiusKm) : 30,
           createdAt: callData.createdAt || callData.created_at || new Date().toISOString(),
           paymentStatus: resolvedPaymentStatus,
+          goalkeeperCancelled: Boolean(callData.goalkeeperCancelled || callData.goalkeeper_cancelled),
+          goalkeeperCancelReason: callData.goalkeeperCancelReason || callData.goalkeeper_cancel_reason,
+          goalkeeperCancelDetails: callData.goalkeeperCancelDetails || callData.goalkeeper_cancel_details,
+          goalkeeperCancelledAt: callData.goalkeeperCancelledAt || callData.goalkeeper_cancelled_at,
+          previousGoalkeeperName: callData.previousGoalkeeperName,
+          sosTriggered: Boolean(callData.sosTriggered),
           notes: callData.notes || 'Partida publicada via Radar ParedãoGK Itapeva.',
         };
 
-        const isOwnCreatedFreeCall =
-          formattedBooking.organizerId === activeUser.id && resolvedPaymentStatus !== 'paid';
+        const isOwnCreatedMatch = formattedBooking.organizerId === activeUser.id;
+        const isCancelledByCurrentGk =
+          formattedBooking.goalkeeperCancelled &&
+          formattedBooking.previousGoalkeeperName &&
+          formattedBooking.previousGoalkeeperName.toLowerCase() === activeUser.name.toLowerCase();
 
         if (
-          !isOwnCreatedFreeCall &&
+          !isOwnCreatedMatch &&
+          !isCancelledByCurrentGk &&
           (activeUser.role === 'goleiro' ||
             formattedBooking.organizerId === 'org-realtime-test' ||
             Boolean(callData.sosTriggered))
@@ -541,7 +777,21 @@ export default function App() {
           setIsCallAlertOpen(true);
         }
 
-        setUnreadNotifications((prev) => prev + 1);
+        if (
+          resolvedPaymentStatus === 'paid' &&
+          (resolvedStatus === 'confirmed' || resolvedStatus === 'custody_confirmed') &&
+          (activeUser.role === 'goleiro' || formattedBooking.goalkeeperId === activeUser.id)
+        ) {
+          triggerNativeEscalationNotification({
+            id: `notif-esc-${formattedBooking.id}`,
+            matchId: formattedBooking.id,
+            arenaName: formattedBooking.arenaName,
+            showPushToast: true,
+          });
+        } else {
+          setUnreadNotifications((prev) => prev + 1);
+        }
+
         setRecentBooking(formattedBooking);
 
         // Atualizar lista de partidas sem duplicar
@@ -773,6 +1023,57 @@ export default function App() {
     );
   };
 
+  // Confirmar cancelamento formal do goleiro com justificativa obrigatória
+  const handleConfirmGoalkeeperCancel = async ({
+    match,
+    reason,
+    details,
+  }: {
+    match: MatchBooking;
+    reason: string;
+    details: string;
+  }) => {
+    const result = await cancelGoalkeeperParticipationInSupabase({
+      match,
+      goalkeeper: currentUser,
+      reason,
+      details,
+    });
+
+    setMatches((prev) =>
+      prev.map((m) => (m.id === match.id ? result.reopenedMatch : m))
+    );
+    if (recentBooking?.id === match.id) {
+      setRecentBooking(result.reopenedMatch);
+    }
+
+    setCancelModalMatch(null);
+
+    const isSameUserOrganizer =
+      currentUser.role === 'contratante' ||
+      (match.organizerId && match.organizerId === currentUser.id);
+
+    if (isSameUserOrganizer) {
+      triggerGoalkeeperCancelledNotification({
+        id: result.contractorNotification.id,
+        matchId: match.id,
+        arenaName: match.arenaName,
+        goalkeeperName: currentUser.name,
+        reason,
+        description: result.contractorNotification.description,
+        showPushToast: true,
+      });
+    } else {
+      setPushToastBanner({
+        id: `gk-cancel-ack-${match.id}`,
+        title: `Cancelamento registrado · ${match.arenaName}`,
+        description: `O capitão ${match.organizerName || ''} foi notificado (${reason}) e a vaga foi reaberta no radar de 30 km.`,
+        matchId: match.id,
+        variant: 'cancellation',
+      });
+    }
+  };
+
   // Aceite direto de vaga pelo painel da partida
   const handleAcceptMatchVacancy = async (match: MatchBooking) => {
     const { updatedMatch } = await acceptMatchVacancyInSupabase({
@@ -917,7 +1218,18 @@ export default function App() {
         ? prev.map((m) => (m.id === paidMatch.id ? paidMatch : m))
         : [paidMatch, ...prev];
     });
-    setUnreadNotifications((prev) => prev + 1);
+
+    const isForCurrentGk =
+      currentUser.role === 'goleiro' ||
+      paidMatch.goalkeeperId === currentUser.id ||
+      Boolean(paidMatch.slots?.some((s) => s.goalkeeperId === currentUser.id));
+
+    triggerNativeEscalationNotification({
+      id: `notif-esc-${paidMatch.id}`,
+      matchId: paidMatch.id,
+      arenaName: paidMatch.arenaName,
+      showPushToast: isForCurrentGk,
+    });
 
     setCurrentUser((prev) => ({
       ...prev,
@@ -1197,6 +1509,63 @@ export default function App() {
         </div>
       )}
 
+      {/* Native In-App Push Notification Banner (Escalação Confirmada ou Cancelamento de Goleiro) */}
+      {pushToastBanner && (
+        <div className="max-w-6xl w-full mx-auto px-4 sm:px-6 pt-3">
+          <div
+            className={`p-3.5 sm:p-4 rounded-2xl shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+              pushToastBanner.variant === 'cancellation'
+                ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-amber-500/25'
+                : 'bg-gradient-to-r from-[#22c55e] to-emerald-500 text-slate-950 shadow-emerald-500/25'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={
+                pushToastBanner.variant === 'cancellation'
+                  ? navigateToCancelledMatchDetails
+                  : navigateToConfirmedMatchDetails
+              }
+              className="flex items-start sm:items-center gap-3 text-left flex-1 cursor-pointer"
+            >
+              <div className="w-9 h-9 rounded-xl bg-slate-950/15 flex items-center justify-center shrink-0 font-extrabold text-sm">
+                {pushToastBanner.variant === 'cancellation' ? '⚠️' : '🛡️'}
+              </div>
+              <div className="min-w-0">
+                <span className="font-extrabold text-xs block">{pushToastBanner.title}</span>
+                <span className="text-xs font-semibold text-slate-900 block">
+                  {pushToastBanner.description}
+                </span>
+              </div>
+            </button>
+            <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+              <button
+                type="button"
+                onClick={
+                  pushToastBanner.variant === 'cancellation'
+                    ? navigateToCancelledMatchDetails
+                    : navigateToConfirmedMatchDetails
+                }
+                className={`px-3.5 py-1.5 rounded-xl bg-slate-950 text-xs font-extrabold cursor-pointer hover:opacity-90 ${
+                  pushToastBanner.variant === 'cancellation'
+                    ? 'text-amber-400'
+                    : 'text-[#22c55e]'
+                }`}
+              >
+                {pushToastBanner.variant === 'cancellation' ? 'Ver Vaga / SOS' : 'Ver Detalhes'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPushToastBanner(null)}
+                className="px-2.5 py-1.5 rounded-xl bg-slate-950/15 text-slate-950 text-xs font-bold cursor-pointer hover:bg-slate-950/25"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Confirmation Success Banner */}
       {confirmationBanner && (
         <div className="max-w-6xl w-full mx-auto px-4 sm:px-6 pt-4">
@@ -1280,7 +1649,9 @@ export default function App() {
             onSelectGoalkeeperForPayment={handleSelectGoalkeeperForPayment}
             onTrigger20MinEnRouteAlert={handleTrigger20MinEnRouteAlert}
             onConfirmEnRoute20m={handleConfirmEnRoute20m}
+            onOpenGoalkeeperCancelModal={(m) => setCancelModalMatch(m)}
             onOpenHistory={() => setIsHistoryModalOpen(true)}
+            onOpenChat={() => setCurrentTab('chat')}
             onOpenPerformance={() => setCurrentTab('performance')}
             onOpenAuth={() => setIsAuthModalOpen(true)}
             onOpenGoalkeeperRadarSignup={() => {
@@ -1333,7 +1704,10 @@ export default function App() {
         {currentTab === 'notifications' && (
           <NotificationsTab
             userId={currentUser.id}
+            localNotifications={localNotifications}
             onNavigateTab={(tab) => setCurrentTab(tab)}
+            onOpenConfirmedMatchDetails={() => navigateToConfirmedMatchDetails()}
+            onOpenCancelledMatchDetails={() => navigateToCancelledMatchDetails()}
             onConfirmEnRouteFromNotification={() => {
               const target =
                 matches.find(
@@ -1511,6 +1885,7 @@ export default function App() {
           handleTriggerSos(match, 10, 15);
           setCurrentTab('home');
         }}
+        onOpenGoalkeeperCancelModal={(m) => setCancelModalMatch(m)}
         onOpenPdfReport={({ scope, selectedMatch }) =>
           setPdfReportModal({
             isOpen: true,
@@ -1582,6 +1957,15 @@ export default function App() {
         booking={realtimeAlertBooking}
         onAcceptAndOpen={handleAcceptRealtimeCall}
         onOpenWhatsApp={handleOpenWhatsApp}
+      />
+
+      {/* Modal de Cancelamento do Goleiro com Justificativas Obrigatórias */}
+      <GoalkeeperCancelModal
+        isOpen={Boolean(cancelModalMatch)}
+        match={cancelModalMatch}
+        goalkeeperName={currentUser.name}
+        onClose={() => setCancelModalMatch(null)}
+        onConfirmCancel={handleConfirmGoalkeeperCancel}
       />
 
       {/* Indicador Visual Discreto de Conectividade PWA (Online / Offline & Auto-Sync) */}

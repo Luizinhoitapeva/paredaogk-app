@@ -3142,6 +3142,27 @@ app.post('/api/convocacao/notificar-goleiros', async (req: Request, res: Respons
 });
 
 const radarMatchesMemory = new Map<string, Record<string, any>>();
+const confirmedMatchesMemory = new Map<string, Record<string, any>>();
+const notificationsMemory = new Map<string, Array<Record<string, any>>>();
+
+function formatArenaEscalationPhrase(arenaName: string): string {
+  const clean = String(arenaName || 'Arena ParedãoGK').trim();
+  const display = clean.toLowerCase().startsWith('arena') ? clean : `Arena ${clean}`;
+  return `Sua escalação na ${display} foi confirmada pelo capitão! Toque para ver os detalhes.`;
+}
+
+function formatGoalkeeperCancellationPhrase(goalkeeperName: string, reason: string): string {
+  const cleanGk = String(goalkeeperName || 'Goleiro').trim();
+  const cleanReason = String(reason || 'Imprevisto de última hora').trim();
+  return `O goleiro ${cleanGk} cancelou a participação devido a ${cleanReason}. A vaga foi reaberta no radar de 30 km.`;
+}
+
+function pushNotificationInMemory(userId: string, item: Record<string, any>) {
+  if (!userId) return;
+  const current = notificationsMemory.get(userId) || [];
+  const filtered = current.filter((n) => n.id !== item.id);
+  notificationsMemory.set(userId, [item, ...filtered].slice(0, 40));
+}
 
 /**
  * 4.5 Rota de API: POST /api/convocacao/publicar-radar
@@ -3294,6 +3315,12 @@ app.get('/api/convocacao/partidas-radar', async (_req: Request, res: Response) =
             candidates: existingMem?.candidates || [],
             slots: existingMem?.slots || undefined,
             notes: row.notes || existingMem?.notes || '',
+            goalkeeperCancelled: Boolean(row.goalkeeper_cancelled ?? existingMem?.goalkeeperCancelled),
+            goalkeeperCancelReason: row.goalkeeper_cancel_reason || existingMem?.goalkeeperCancelReason || undefined,
+            goalkeeperCancelDetails: row.goalkeeper_cancel_details || existingMem?.goalkeeperCancelDetails || undefined,
+            goalkeeperCancelledAt: row.goalkeeper_cancelled_at || existingMem?.goalkeeperCancelledAt || undefined,
+            previousGoalkeeperName: existingMem?.previousGoalkeeperName || undefined,
+            sosTriggered: Boolean(row.sos_triggered ?? existingMem?.sosTriggered),
             createdAt: row.created_at || existingMem?.createdAt || new Date().toISOString(),
           });
         }
@@ -3414,6 +3441,165 @@ app.post('/api/convocacao/candidatar', async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       error: err?.message || 'Erro ao registrar candidatura do goleiro.',
+    });
+  }
+});
+
+/**
+ * 4.7b Rota de API: GET /api/convocacao/partidas-goleiro
+ * Lista partidas confirmadas/com custódia garantida vinculadas ao goleiro logado.
+ */
+app.get('/api/convocacao/partidas-goleiro', async (req: Request, res: Response) => {
+  try {
+    const userId = String(req.query.userId || '').trim();
+    const userName = String(req.query.name || '').trim().toLowerCase();
+    const mergedMap = new Map<string, any>();
+
+    for (const [id, m] of confirmedMatchesMemory.entries()) {
+      const slotMatch = Array.isArray(m.slots) && m.slots.some((s: any) => s?.goalkeeperId === userId);
+      const nameMatch =
+        userName &&
+        m.goalkeeperName &&
+        String(m.goalkeeperName).toLowerCase().includes(userName);
+      if (!userId || m.goalkeeperId === userId || slotMatch || nameMatch) {
+        mergedMap.set(id, m);
+      }
+    }
+
+    const supabaseClient = getServerSupabaseAdminClient(false);
+    if (supabaseClient) {
+      let query = supabaseClient
+        .from('matches')
+        .select('*')
+        .in('status', ['confirmed', 'custody_confirmed', 'in_progress'])
+        .order('created_at', { ascending: false })
+        .limit(40);
+
+      if (userId && isValidUuid(userId)) {
+        query = query.eq('goalkeeper_id', userId);
+      }
+
+      const { data, error } = await query;
+      if (!error && Array.isArray(data)) {
+        for (const row of data) {
+          const id = String(row.id);
+          const existingMem = mergedMap.get(id);
+          const slotsCount = row.goalkeeper_slots_count === 2 ? 2 : 1;
+          const price = Number(row.price || 25);
+          const houseFee = Number(row.house_fee ?? HOUSE_FEE_BRL * slotsCount);
+
+          mergedMap.set(id, {
+            id,
+            organizerId: row.organizer_id || existingMem?.organizerId || '',
+            organizerName: row.organizer_name || existingMem?.organizerName || 'Capitão Organizador',
+            goalkeeperId: row.goalkeeper_id || existingMem?.goalkeeperId || undefined,
+            goalkeeperName: row.goalkeeper_name || existingMem?.goalkeeperName || undefined,
+            goalkeeperPhoto: row.goalkeeper_photo || existingMem?.goalkeeperPhoto || undefined,
+            arenaName: row.arena_name || existingMem?.arenaName || 'Arena Itapeva',
+            address: row.address || existingMem?.address || 'Itapeva - SP',
+            city: row.city || existingMem?.city || 'Itapeva - SP',
+            date: row.date || existingMem?.date || 'Hoje',
+            time: row.time || existingMem?.time || '20:00 - 21:00',
+            durationMinutes: row.duration_minutes ? Number(row.duration_minutes) : existingMem?.durationMinutes || 90,
+            modality: row.modality || existingMem?.modality || 'Society',
+            competitiveLevel: row.competitive_level || existingMem?.competitiveLevel || 'Médio',
+            gameLevel: row.game_level || row.competitive_level || existingMem?.gameLevel || 'Médio',
+            goalkeeperSlotsCount: slotsCount,
+            price,
+            houseFee,
+            goalkeeperPayout: Number(row.goalkeeper_payout ?? Math.max(0, price - houseFee)),
+            cashbackEarned: Number(row.cashback_earned ?? Number((price * 0.1).toFixed(2))),
+            status: row.status || 'confirmed',
+            paymentStatus: row.payment_status || 'paid',
+            operationalStatus: existingMem?.operationalStatus || row.operational_status || 'accepted',
+            slots: existingMem?.slots,
+            notes: row.notes || existingMem?.notes || '',
+            createdAt: row.created_at || existingMem?.createdAt || new Date().toISOString(),
+            checkin2hConfirmed: Boolean(row.checkin_2h_confirmed),
+            enRoute45mConfirmed: Boolean(row.en_route_45m_confirmed),
+            enRoute20mNotified: Boolean(row.en_route_20m_notified),
+            enRoute20mConfirmed: Boolean(row.en_route_20m_confirmed || row.en_route_45m_confirmed),
+          });
+        }
+      }
+    }
+
+    const list = Array.from(mergedMap.values()).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+
+    return res.status(200).json({
+      success: true,
+      count: list.length,
+      matches: list,
+    });
+  } catch (err: any) {
+    console.error('[Partidas Goleiro Error]', err);
+    return res.status(500).json({
+      success: false,
+      matches: [],
+      error: err?.message || 'Erro ao buscar partidas confirmadas do goleiro.',
+    });
+  }
+});
+
+/**
+ * 4.7c Rota de API: GET /api/notificacoes
+ * Lista notificações reais do usuário (Supabase + fallback em memória).
+ */
+app.get('/api/notificacoes', async (req: Request, res: Response) => {
+  try {
+    const userId = String(req.query.userId || '').trim();
+    const mergedMap = new Map<string, any>();
+
+    if (userId && notificationsMemory.has(userId)) {
+      for (const n of notificationsMemory.get(userId) || []) {
+        mergedMap.set(String(n.id), n);
+      }
+    }
+
+    const supabaseClient = getServerSupabaseAdminClient(false);
+    if (supabaseClient && userId && isValidUuid(userId)) {
+      const { data, error } = await supabaseClient
+        .from('notifications')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(30);
+
+      if (!error && Array.isArray(data)) {
+        for (const row of data) {
+          const id = String(row.id);
+          if (!mergedMap.has(id)) {
+            mergedMap.set(id, {
+              id,
+              userId: row.user_id,
+              title: row.title || 'Notificação ParedãoGK',
+              description: row.description || '',
+              category: row.category || 'system',
+              read: Boolean(row.read),
+              matchId: row.match_id || undefined,
+              arenaName: row.arena_name || undefined,
+              createdAt: row.created_at || new Date().toISOString(),
+            });
+          }
+        }
+      }
+    }
+
+    const list = Array.from(mergedMap.values()).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+
+    return res.status(200).json({
+      success: true,
+      notifications: list,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      notifications: [],
+      error: err?.message || 'Erro ao carregar notificações.',
     });
   }
 });
@@ -3665,6 +3851,65 @@ app.post('/api/convocacao/confirmar-custodia', async (req: Request, res: Respons
 
     radarMatchesMemory.delete(cleanMatchKey);
 
+    const confirmedMatchRecord = {
+      ...match,
+      id: cleanMatchKey,
+      status: match.status === 'custody_confirmed' ? 'custody_confirmed' : 'confirmed',
+      paymentStatus: 'paid',
+      operationalStatus: match.operationalStatus || 'accepted',
+      houseFee: totalHouseFee,
+      goalkeeperPayout: totalNetCustody,
+      createdAt: match.createdAt || nowIso,
+    };
+    confirmedMatchesMemory.set(cleanMatchKey, confirmedMatchRecord);
+
+    const slotTargetsForNotification: string[] = Array.from(
+      new Set([
+        ...(Array.isArray(match.slots)
+          ? match.slots.map((s: any) => s?.goalkeeperId).filter(Boolean)
+          : []),
+        ...(match.goalkeeperId ? [String(match.goalkeeperId)] : []),
+      ])
+    );
+
+    const escalationMsg = formatArenaEscalationPhrase(match.arenaName);
+    for (const targetGkId of slotTargetsForNotification) {
+      const notifId = `notif-esc-${cleanMatchKey}-${targetGkId.slice(-6)}`;
+      const notifObj = {
+        id: notifId,
+        userId: targetGkId,
+        category: 'match',
+        title: `🛡️ Escalação Confirmada · ${match.arenaName}`,
+        description: escalationMsg,
+        read: false,
+        matchId: cleanMatchKey,
+        arenaName: match.arenaName,
+        actionTab: 'home',
+        actionType: 'view_confirmed_match',
+        createdAt: nowIso,
+      };
+      pushNotificationInMemory(targetGkId, notifObj);
+
+      if (supabaseClient && isValidUuid(targetGkId)) {
+        await resilientSupabaseUpsert(
+          supabaseClient,
+          'notifications',
+          {
+            id: notifId,
+            user_id: targetGkId,
+            category: 'match',
+            title: notifObj.title,
+            description: escalationMsg,
+            read: false,
+            match_id: cleanMatchKey,
+            arena_name: match.arenaName,
+            created_at: nowIso,
+          },
+          'id'
+        ).catch(() => undefined);
+      }
+    }
+
     return res.status(200).json({
       success: true,
       matchId: cleanMatchKey,
@@ -3676,12 +3921,200 @@ app.post('/api/convocacao/confirmar-custodia', async (req: Request, res: Respons
       slotsCredited,
       matchPersisted,
       supabaseCredited,
+      confirmedMatch: confirmedMatchRecord,
+      notificationSentCount: slotTargetsForNotification.length,
     });
   } catch (err: any) {
     console.error('[Confirmar Custodia Error]', err);
     return res.status(500).json({
       success: false,
       error: err?.message || 'Erro ao processar separação financeira de custódia e taxa da casa.',
+    });
+  }
+});
+
+/**
+ * 6. Rota de API: POST /api/convocacao/cancelar-goleiro
+ * Processa o cancelamento formal com justificativa obrigatória pelo goleiro,
+ * reabre a vaga no Radar 30 km, aciona SOS se já pago e notifica a contratante em tempo real.
+ */
+app.post('/api/convocacao/cancelar-goleiro', async (req: Request, res: Response) => {
+  try {
+    const {
+      match,
+      matchId,
+      goalkeeperId,
+      goalkeeperName,
+      reason,
+      details = '',
+    } = req.body || {};
+
+    const cleanMatchKey = String(matchId || match?.id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    const cleanReason = String(reason || '').trim();
+    const cleanDetails = String(details || '').trim();
+    const cleanGkId = String(goalkeeperId || match?.goalkeeperId || '').trim();
+    const cleanGkName = String(goalkeeperName || match?.goalkeeperName || 'Goleiro').trim();
+
+    if (!cleanMatchKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'Identificador da partida (matchId) é obrigatório para cancelar.',
+      });
+    }
+
+    if (!cleanReason) {
+      return res.status(400).json({
+        success: false,
+        error: 'Justificativa obrigatória para cancelar a participação.',
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    const existingConfirmed = confirmedMatchesMemory.get(cleanMatchKey);
+    const existingRadar = radarMatchesMemory.get(cleanMatchKey);
+    const baseMatch = existingConfirmed || existingRadar || match || { id: cleanMatchKey };
+
+    const remainingCandidates = Array.isArray(baseMatch.candidates)
+      ? baseMatch.candidates.filter((c: any) => String(c?.id || '') !== cleanGkId)
+      : [];
+
+    const existingSlots = Array.isArray(baseMatch.slots) ? baseMatch.slots : [];
+    const updatedSlots = existingSlots.map((slot: any) =>
+      slot?.goalkeeperId === cleanGkId
+        ? {
+            ...slot,
+            goalkeeperId: undefined,
+            goalkeeperName: undefined,
+            goalkeeperPhoto: undefined,
+            status: 'open',
+          }
+        : slot
+    );
+
+    const hasPaidCustody = baseMatch.paymentStatus === 'paid';
+    const cancellationNote = cleanDetails
+      ? `⚠️ Cancelado por ${cleanGkName} (${cleanReason}: ${cleanDetails}). Vaga reaberta no radar de 30 km.`
+      : `⚠️ Cancelado por ${cleanGkName} (${cleanReason}). Vaga reaberta no radar de 30 km.`;
+
+    const reopenedMatch: Record<string, any> = {
+      ...baseMatch,
+      id: cleanMatchKey,
+      goalkeeperId: undefined,
+      goalkeeperName: 'Aguardando Substituto (Radar 30 km)',
+      goalkeeperPhoto: undefined,
+      previousGoalkeeperName: cleanGkName,
+      status: 'searching',
+      operationalStatus: 'awaiting_acceptance',
+      checkin2hConfirmed: false,
+      enRoute45mConfirmed: false,
+      enRoute20mNotified: false,
+      enRoute20mConfirmed: false,
+      goalkeeperCancelled: true,
+      goalkeeperCancelReason: cleanReason,
+      goalkeeperCancelDetails: cleanDetails || undefined,
+      goalkeeperCancelledAt: nowIso,
+      sosTriggered: hasPaidCustody ? true : Boolean(baseMatch.sosTriggered),
+      sosTriggeredAt: hasPaidCustody
+        ? new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+        : baseMatch.sosTriggeredAt,
+      sosRadiusKm: Number(baseMatch.radiusKm || baseMatch.sosRadiusKm || 30),
+      candidates: remainingCandidates,
+      slots: updatedSlots.length > 0 ? updatedSlots : baseMatch.slots,
+      notes: cancellationNote,
+      createdAt: baseMatch.createdAt || nowIso,
+    };
+
+    confirmedMatchesMemory.delete(cleanMatchKey);
+    radarMatchesMemory.set(cleanMatchKey, reopenedMatch);
+
+    const organizerId = String(baseMatch.organizerId || '').trim();
+    const arenaName = String(baseMatch.arenaName || 'Arena ParedãoGK').trim();
+    const coreMessage = formatGoalkeeperCancellationPhrase(cleanGkName, cleanReason);
+    const fullDescription = cleanDetails
+      ? `${coreMessage} Observação: "${cleanDetails}"`
+      : coreMessage;
+
+    const notifId = `notif-gk-cancel-${cleanMatchKey}-${Date.now().toString().slice(-5)}`;
+    const contractorNotification = {
+      id: notifId,
+      userId: organizerId,
+      user_id: organizerId,
+      category: 'match',
+      title: `⚠️ Goleiro Cancelou Participação · ${arenaName}`,
+      description: fullDescription,
+      read: false,
+      matchId: cleanMatchKey,
+      match_id: cleanMatchKey,
+      arenaName,
+      arena_name: arenaName,
+      actionTab: 'home',
+      actionType: 'view_cancelled_match',
+      action_type: 'view_cancelled_match',
+      createdAt: nowIso,
+      created_at: nowIso,
+    };
+
+    if (organizerId) {
+      pushNotificationInMemory(organizerId, contractorNotification);
+    }
+
+    const supabaseClient = getServerSupabaseAdminClient(false);
+    let synced = false;
+    if (supabaseClient) {
+      const matchUpdateRes = await resilientSupabaseUpdate(
+        supabaseClient,
+        'matches',
+        {
+          status: 'searching',
+          goalkeeper_id: null,
+          goalkeeper_name: 'Aguardando Substituto (Radar 30 km)',
+          goalkeeper_cancelled: true,
+          goalkeeper_cancel_reason: cleanReason,
+          goalkeeper_cancel_details: cleanDetails || null,
+          goalkeeper_cancelled_at: nowIso,
+          checkin_2h_confirmed: false,
+          en_route_45m_confirmed: false,
+          notes: cancellationNote,
+        },
+        'id',
+        cleanMatchKey
+      );
+      synced = !matchUpdateRes.error;
+
+      if (isValidUuid(organizerId)) {
+        await resilientSupabaseUpsert(
+          supabaseClient,
+          'notifications',
+          {
+            id: notifId,
+            user_id: organizerId,
+            category: 'match',
+            title: contractorNotification.title,
+            description: fullDescription,
+            read: false,
+            match_id: cleanMatchKey,
+            arena_name: arenaName,
+            created_at: nowIso,
+          },
+          'id'
+        ).catch(() => undefined);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      matchId: cleanMatchKey,
+      vacancyReopened: true,
+      custodyAction: hasPaidCustody ? 'preserved_for_sos_or_refund' : 'reopened',
+      synced,
+      reopenedMatch,
+      contractorNotification,
+    });
+  } catch (err: any) {
+    console.error('[Cancelar Goleiro Error]', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Erro ao processar cancelamento do goleiro.',
     });
   }
 });

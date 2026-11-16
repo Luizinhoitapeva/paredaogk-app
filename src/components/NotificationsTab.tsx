@@ -14,16 +14,22 @@ import { fetchNotificationsFromSupabase, isSupabaseConfigured, supabase } from '
 
 interface NotificationsTabProps {
   userId?: string;
+  localNotifications?: NotificationItem[];
   onNavigateTab: (tab: TabType) => void;
   onConfirmEnRouteFromNotification?: () => void;
+  onOpenConfirmedMatchDetails?: (matchId?: string) => void;
+  onOpenCancelledMatchDetails?: (matchId?: string) => void;
 }
 
 export const NotificationsTab: React.FC<NotificationsTabProps> = ({
   userId,
+  localNotifications = [],
   onNavigateTab,
   onConfirmEnRouteFromNotification,
+  onOpenConfirmedMatchDetails,
+  onOpenCancelledMatchDetails,
 }) => {
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>(localNotifications);
   const [filterCategory, setFilterCategory] = useState<string>('todas');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -32,7 +38,13 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
     setIsLoading(true);
     fetchNotificationsFromSupabase(userId)
       .then((rows) => {
-        if (active) setNotifications(rows);
+        if (!active) return;
+        const merged = new Map<string, NotificationItem>();
+        localNotifications.forEach((n) => merged.set(n.id, n));
+        rows.forEach((r) => {
+          if (!merged.has(r.id)) merged.set(r.id, r);
+        });
+        setNotifications(Array.from(merged.values()));
       })
       .finally(() => {
         if (active) setIsLoading(false);
@@ -40,7 +52,7 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
     return () => {
       active = false;
     };
-  }, [userId]);
+  }, [userId, localNotifications]);
 
   const handleMarkAllRead = () => {
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
@@ -152,7 +164,11 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
               key={item.id}
               onClick={() => {
                 handleToggleRead(item.id);
-                if (item.actionTab) {
+                if (item.actionType === 'view_confirmed_match' && onOpenConfirmedMatchDetails) {
+                  onOpenConfirmedMatchDetails(item.matchId);
+                } else if (item.actionType === 'view_cancelled_match' && onOpenCancelledMatchDetails) {
+                  onOpenCancelledMatchDetails(item.matchId);
+                } else if (item.actionTab) {
                   onNavigateTab(item.actionTab);
                 }
               }}
@@ -191,6 +207,34 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
                     {item.description}
                   </p>
                 </div>
+
+                {item.actionType === 'view_confirmed_match' && onOpenConfirmedMatchDetails && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleToggleRead(item.id);
+                      onOpenConfirmedMatchDetails(item.matchId);
+                    }}
+                    className="px-3.5 py-1.5 rounded-lg bg-[#22c55e] hover:brightness-110 text-slate-950 font-extrabold text-[11px] cursor-pointer transition-all"
+                  >
+                    Ver Detalhes da Escalação
+                  </button>
+                )}
+
+                {item.actionType === 'view_cancelled_match' && onOpenCancelledMatchDetails && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleToggleRead(item.id);
+                      onOpenCancelledMatchDetails(item.matchId);
+                    }}
+                    className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-[11px] cursor-pointer transition-all"
+                  >
+                    Ver Vaga Reaberta / Acionar SOS
+                  </button>
+                )}
 
                 {item.actionType === 'confirm_en_route' && onConfirmEnRouteFromNotification && (
                   <button

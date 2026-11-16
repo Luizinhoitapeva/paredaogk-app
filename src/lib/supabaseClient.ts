@@ -951,6 +951,36 @@ export function subscribeToRealtimeBookingsAndNotifications(callbacks: {
     }
   );
 
+  channel.on(
+    'broadcast',
+    { event: 'goalkeeper_escalation_confirmed' },
+    ({ payload }) => {
+      console.log('[Supabase Realtime Broadcast: Escalação Confirmada]', payload);
+      if (payload?.match) {
+        callbacks.onMatchChange(payload.match, 'UPDATE');
+      }
+      if (payload?.notification) {
+        callbacks.onNotification(payload.notification);
+      }
+      playWhistleNotification();
+    }
+  );
+
+  channel.on(
+    'broadcast',
+    { event: 'goalkeeper_cancelled_match' },
+    ({ payload }) => {
+      console.log('[Supabase Realtime Broadcast: Goleiro Cancelou Participação]', payload);
+      if (payload?.match) {
+        callbacks.onMatchChange(payload.match, 'UPDATE');
+      }
+      if (payload?.notification) {
+        callbacks.onNotification(payload.notification);
+      }
+      playWhistleNotification();
+    }
+  );
+
   channel.subscribe((status) => {
     console.log(`[Supabase Realtime Channel Status: ${status}]`);
   });
@@ -960,17 +990,56 @@ export function subscribeToRealtimeBookingsAndNotifications(callbacks: {
   };
 }
 
+export function formatEscalationConfirmationMessage(arenaName?: string): string {
+  const clean = String(arenaName || 'Arena ParedãoGK').trim();
+  const display = clean.toLowerCase().startsWith('arena') ? clean : `Arena ${clean}`;
+  return `Sua escalação na ${display} foi confirmada pelo capitão! Toque para ver os detalhes.`;
+}
+
+export function formatGoalkeeperCancellationMessage(
+  goalkeeperName?: string,
+  reason?: string
+): string {
+  const cleanGk = String(goalkeeperName || 'Goleiro').trim();
+  const cleanReason = String(reason || 'Imprevisto de última hora').trim();
+  return `O goleiro ${cleanGk} cancelou a participação devido a ${cleanReason}. A vaga foi reaberta no radar de 30 km.`;
+}
+
 /**
  * Dispara o evento de liquidação e confirmação de convocação para o canal Realtime
  */
 export async function broadcastBookingConfirmed(booking: any) {
   try {
     const channel = supabase.channel('paredaogk-realtime-matches');
+    const escalationMessage = formatEscalationConfirmationMessage(booking?.arenaName);
+    const notifPayload = {
+      id: `notif-esc-${booking?.id || Date.now()}`,
+      user_id: booking?.goalkeeperId || '',
+      title: `🛡️ Escalação Confirmada · ${booking?.arenaName || 'Arena'}`,
+      description: escalationMessage,
+      category: 'match',
+      match_id: booking?.id,
+      arena_name: booking?.arenaName,
+      action_type: 'view_confirmed_match',
+      created_at: new Date().toISOString(),
+    };
+
     await channel.send({
       type: 'broadcast',
       event: 'mercadopago_payment_liquidated',
       payload: booking,
     });
+
+    await channel
+      .send({
+        type: 'broadcast',
+        event: 'goalkeeper_escalation_confirmed',
+        payload: {
+          match: booking,
+          notification: notifPayload,
+        },
+      })
+      .catch(() => undefined);
 
     // Se o Supabase estiver com credenciais ativas, grava também nas tabelas matches e notifications
     if (isSupabaseConfigured) {
@@ -982,11 +1051,15 @@ export async function broadcastBookingConfirmed(booking: any) {
           goalkeeper_id: booking.goalkeeperId || null,
           goalkeeper_name: booking.goalkeeperName || 'Goleiro GK',
           arena_name: booking.arenaName,
+          address: booking.address || 'Itapeva - SP',
+          city: booking.city || 'Itapeva - SP',
           date: booking.date,
           time: booking.time,
           modality: booking.modality,
           price: booking.price,
-          status: 'confirmed',
+          house_fee: booking.houseFee ?? ITAPEVA_HOUSE_FEE,
+          goalkeeper_payout: booking.goalkeeperPayout ?? Math.max(0, Number(booking.price || 25) - ITAPEVA_HOUSE_FEE),
+          status: booking.status === 'custody_confirmed' ? 'custody_confirmed' : 'confirmed',
           payment_provider: 'mercadopago',
           payment_status: 'paid',
           created_at: new Date().toISOString(),
@@ -994,14 +1067,14 @@ export async function broadcastBookingConfirmed(booking: any) {
       ]);
 
       if (booking.goalkeeperId) {
-        await supabase.from('notifications').insert([
+        await supabase.from('notifications').upsert([
           {
-            id: `notif-${Date.now()}`,
-            title: '🚨 Nova Convocação Confirmada via Pix!',
-            description: `Partida confirmada na ${booking.arenaName} (${booking.date} às ${booking.time}). Cachê de R$ ${booking.price?.toFixed(2)} liquidado via Mercado Pago.`,
+            id: notifPayload.id,
+            title: notifPayload.title,
+            description: escalationMessage,
             user_id: booking.goalkeeperId,
             category: 'match',
-            created_at: new Date().toISOString(),
+            created_at: notifPayload.created_at,
           },
         ]);
       }
@@ -2522,16 +2595,50 @@ export async function fetchOpenRadarMatches(): Promise<MatchBooking[]> {
   return [];
 }
 
+export async function fetchGoalkeeperConfirmedMatches(
+  userId?: string,
+  userName?: string
+): Promise<MatchBooking[]> {
+  try {
+    const qs = new URLSearchParams();
+    if (userId && userId !== 'usr-guest') qs.set('userId', userId);
+    if (userName) qs.set('name', userName);
+    const res = await fetch(`/api/convocacao/partidas-goleiro?${qs.toString()}`);
+    const parsed = await safeParseJsonResponse<{
+      success: boolean;
+      matches?: MatchBooking[];
+    }>(res, 'Partidas Confirmadas do Goleiro');
+    if (parsed.valid && parsed.data?.success && Array.isArray(parsed.data.matches)) {
+      return parsed.data.matches;
+    }
+  } catch (err) {
+    console.warn('[fetchGoalkeeperConfirmedMatches warning]', err);
+  }
+  return [];
+}
+
 /**
  * Busca partidas oficiais do usuário/rede na tabela 'matches' do Supabase
- * e mescla com partidas abertas no radar (status = 'searching') para visibilidade de goleiros.
+ * e mescla com partidas abertas no radar (status = 'searching') e partidas confirmadas do goleiro.
  */
-export async function fetchMatchesFromSupabase(userId?: string): Promise<MatchBooking[]> {
+export async function fetchMatchesFromSupabase(
+  userId?: string,
+  userName?: string
+): Promise<MatchBooking[]> {
   const mergedMap = new Map<string, MatchBooking>();
 
-  const radarMatches = await fetchOpenRadarMatches();
+  const [radarMatches, confirmedGkMatches] = await Promise.all([
+    fetchOpenRadarMatches(),
+    userId && userId !== 'usr-guest'
+      ? fetchGoalkeeperConfirmedMatches(userId, userName)
+      : Promise.resolve([]),
+  ]);
+
   radarMatches.forEach((rm) => {
     if (rm?.id) mergedMap.set(String(rm.id), rm);
+  });
+  confirmedGkMatches.forEach((cm) => {
+    if (cm?.id) mergedMap.set(String(cm.id), cm);
   });
 
   if (!isSupabaseConfigured) {
@@ -2609,7 +2716,12 @@ export async function fetchMatchesFromSupabase(userId?: string): Promise<MatchBo
           enRoute20mNotified: Boolean(row.en_route_20m_notified),
           enRoute20mConfirmed: Boolean(row.en_route_20m_confirmed || row.en_route_45m_confirmed),
           enRoute20mAt: row.en_route_20m_at || undefined,
-          goalkeeperCancelled: Boolean(row.goalkeeper_cancelled),
+          goalkeeperCancelled: Boolean(row.goalkeeper_cancelled ?? existingMem?.goalkeeperCancelled),
+          goalkeeperCancelReason: row.goalkeeper_cancel_reason || existingMem?.goalkeeperCancelReason || undefined,
+          goalkeeperCancelDetails: row.goalkeeper_cancel_details || existingMem?.goalkeeperCancelDetails || undefined,
+          goalkeeperCancelledAt: row.goalkeeper_cancelled_at || existingMem?.goalkeeperCancelledAt || undefined,
+          previousGoalkeeperName: existingMem?.previousGoalkeeperName || undefined,
+          sosTriggered: Boolean(row.sos_triggered ?? existingMem?.sosTriggered),
         });
       });
     }
@@ -2626,7 +2738,83 @@ export async function fetchMatchesFromSupabase(userId?: string): Promise<MatchBo
  * Busca notificações reais do usuário na tabela 'notifications' do Supabase.
  */
 export async function fetchNotificationsFromSupabase(userId?: string): Promise<NotificationItem[]> {
-  if (!isSupabaseConfigured) return [];
+  const mergedMap = new Map<string, NotificationItem>();
+
+  const mapRawNotification = (row: any): NotificationItem => {
+    const titleText = String(row.title || 'Notificação ParedãoGK');
+    const descText = String(row.description || '');
+    const isEnRoutePrompt =
+      titleText.toLowerCase().includes('a caminho') ||
+      descText.toLowerCase().includes('está a caminho do jogo');
+    const isConfirmedEscalation =
+      row.actionType === 'view_confirmed_match' ||
+      row.action_type === 'view_confirmed_match' ||
+      descText.toLowerCase().includes('escalação') ||
+      titleText.toLowerCase().includes('escalação confirmada');
+    const isGoalkeeperCancellation =
+      row.actionType === 'view_cancelled_match' ||
+      row.action_type === 'view_cancelled_match' ||
+      descText.toLowerCase().includes('cancelou a participação') ||
+      titleText.toLowerCase().includes('cancelou participação');
+    const isMatchInvite =
+      !isConfirmedEscalation &&
+      !isGoalkeeperCancellation &&
+      (row.category === 'radar' ||
+        titleText.toLowerCase().includes('convocação') ||
+        titleText.toLowerCase().includes('bora jogar'));
+
+    const rawCreated = row.created_at || row.createdAt;
+    return {
+      id: String(row.id),
+      title: titleText,
+      description: descText,
+      timestamp: rawCreated
+        ? new Date(rawCreated).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
+        : 'Agora',
+      read: Boolean(row.read),
+      category: (row.category || 'system') as NotificationItem['category'],
+      matchId: row.match_id || row.matchId || undefined,
+      arenaName: row.arena_name || row.arenaName || undefined,
+      actionTab:
+        row.category === 'wallet'
+          ? 'wallet'
+          : row.category === 'radar' || row.category === 'match'
+          ? 'home'
+          : undefined,
+      actionType: isEnRoutePrompt
+        ? 'confirm_en_route'
+        : isConfirmedEscalation
+        ? 'view_confirmed_match'
+        : isGoalkeeperCancellation
+        ? 'view_cancelled_match'
+        : isMatchInvite
+        ? 'accept_match'
+        : undefined,
+    };
+  };
+
+  if (userId && userId !== 'usr-guest') {
+    try {
+      const res = await fetch(`/api/notificacoes?userId=${encodeURIComponent(userId)}`);
+      const parsed = await safeParseJsonResponse<{
+        success: boolean;
+        notifications?: any[];
+      }>(res, 'Notificações Servidor');
+      if (parsed.valid && parsed.data?.success && Array.isArray(parsed.data.notifications)) {
+        parsed.data.notifications.forEach((row) => {
+          const item = mapRawNotification(row);
+          mergedMap.set(item.id, item);
+        });
+      }
+    } catch {
+      // ignore server notification fallback errors
+    }
+  }
+
+  if (!isSupabaseConfigured) {
+    return Array.from(mergedMap.values());
+  }
+
   try {
     let query = supabase
       .from('notifications')
@@ -2639,33 +2827,19 @@ export async function fetchNotificationsFromSupabase(userId?: string): Promise<N
     }
 
     const { data, error } = await query;
-    if (error || !data) return [];
-
-    return data.map((row: any) => {
-      const titleText = String(row.title || 'Notificação ParedãoGK');
-      const descText = String(row.description || '');
-      const isEnRoutePrompt =
-        titleText.toLowerCase().includes('a caminho') ||
-        descText.toLowerCase().includes('está a caminho do jogo');
-      const isMatchInvite =
-        row.category === 'radar' || titleText.toLowerCase().includes('convocação') || titleText.toLowerCase().includes('bora jogar');
-      return {
-        id: String(row.id),
-        title: titleText,
-        description: descText,
-        timestamp: row.created_at
-          ? new Date(row.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
-          : 'Agora',
-        read: Boolean(row.read),
-        category: (row.category || 'system') as NotificationItem['category'],
-        actionTab: row.category === 'wallet' ? 'wallet' : row.category === 'radar' || row.category === 'match' ? 'home' : undefined,
-        actionType: isEnRoutePrompt ? 'confirm_en_route' : isMatchInvite ? 'accept_match' : undefined,
-      };
-    });
+    if (!error && Array.isArray(data)) {
+      data.forEach((row: any) => {
+        const item = mapRawNotification(row);
+        if (!mergedMap.has(item.id)) {
+          mergedMap.set(item.id, item);
+        }
+      });
+    }
   } catch (err) {
     console.warn('[fetchNotificationsFromSupabase warning]', err);
-    return [];
   }
+
+  return Array.from(mergedMap.values());
 }
 
 // ==========================================
@@ -3698,6 +3872,198 @@ export async function confirmGoalkeeperEnRoute20mInSupabase(params: {
 
   playWhistleNotification();
   return { synced, updatedMatch };
+}
+
+export async function cancelGoalkeeperParticipationInSupabase(params: {
+  match: MatchBooking;
+  goalkeeper: Pick<UserProfile, 'id' | 'name' | 'nickname'>;
+  reason: string;
+  details?: string;
+}): Promise<{
+  success: boolean;
+  synced: boolean;
+  reopenedMatch: MatchBooking;
+  contractorNotification: {
+    id: string;
+    user_id: string;
+    title: string;
+    description: string;
+    category: 'match';
+    match_id: string;
+    arena_name: string;
+    action_type: 'view_cancelled_match';
+    created_at: string;
+  };
+}> {
+  const nowIso = new Date().toISOString();
+  const gkName = params.goalkeeper.name || params.goalkeeper.nickname || 'Goleiro';
+  const cleanReason = params.reason.trim();
+  const cleanDetails = (params.details || '').trim();
+  const coreMessage = formatGoalkeeperCancellationMessage(gkName, cleanReason);
+  const fullDescription = cleanDetails
+    ? `${coreMessage} Observação: "${cleanDetails}"`
+    : coreMessage;
+
+  const hasPaidCustody = params.match.paymentStatus === 'paid';
+  const remainingCandidates = Array.isArray(params.match.candidates)
+    ? params.match.candidates.filter((c) => c.id !== params.goalkeeper.id)
+    : [];
+  const updatedSlots = Array.isArray(params.match.slots)
+    ? params.match.slots.map((s) =>
+        s.goalkeeperId === params.goalkeeper.id
+          ? { ...s, goalkeeperId: undefined, goalkeeperName: undefined, goalkeeperPhoto: undefined, status: 'open' as const }
+          : s
+      )
+    : undefined;
+
+  let reopenedMatch: MatchBooking = {
+    ...params.match,
+    goalkeeperId: undefined,
+    goalkeeperName: 'Aguardando Substituto (Radar 30 km)',
+    goalkeeperPhoto: undefined,
+    previousGoalkeeperName: gkName,
+    status: 'searching',
+    operationalStatus: 'awaiting_acceptance',
+    checkin2hConfirmed: false,
+    enRoute45mConfirmed: false,
+    enRoute20mNotified: false,
+    enRoute20mConfirmed: false,
+    goalkeeperCancelled: true,
+    goalkeeperCancelReason: cleanReason,
+    goalkeeperCancelDetails: cleanDetails || undefined,
+    goalkeeperCancelledAt: nowIso,
+    sosTriggered: hasPaidCustody ? true : Boolean(params.match.sosTriggered),
+    sosTriggeredAt: hasPaidCustody
+      ? new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      : params.match.sosTriggeredAt,
+    sosRadiusKm: params.match.radiusKm || params.match.sosRadiusKm || 30,
+    candidates: remainingCandidates,
+    slots: updatedSlots,
+    notes: cleanDetails
+      ? `⚠️ Cancelado por ${gkName} (${cleanReason}: ${cleanDetails}). Vaga reaberta no radar de 30 km.`
+      : `⚠️ Cancelado por ${gkName} (${cleanReason}). Vaga reaberta no radar de 30 km.`,
+  };
+
+  let contractorNotification = {
+    id: `notif-gk-cancel-${params.match.id}-${Date.now().toString().slice(-5)}`,
+    user_id: params.match.organizerId || '',
+    title: `⚠️ Goleiro Cancelou Participação · ${params.match.arenaName}`,
+    description: fullDescription,
+    category: 'match' as const,
+    match_id: params.match.id,
+    arena_name: params.match.arenaName,
+    action_type: 'view_cancelled_match' as const,
+    created_at: nowIso,
+  };
+
+  let synced = false;
+
+  try {
+    const res = await fetch('/api/convocacao/cancelar-goleiro', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        match: params.match,
+        matchId: params.match.id,
+        goalkeeperId: params.goalkeeper.id,
+        goalkeeperName: gkName,
+        reason: cleanReason,
+        details: cleanDetails,
+      }),
+    });
+
+    const parsed = await safeParseJsonResponse<{
+      success: boolean;
+      synced?: boolean;
+      reopenedMatch?: MatchBooking;
+      contractorNotification?: any;
+    }>(res, 'Cancelamento do Goleiro');
+
+    if (parsed.valid && parsed.data?.success) {
+      if (parsed.data.reopenedMatch) {
+        reopenedMatch = parsed.data.reopenedMatch;
+      }
+      if (parsed.data.contractorNotification) {
+        contractorNotification = {
+          ...contractorNotification,
+          ...parsed.data.contractorNotification,
+        };
+      }
+      synced = Boolean(parsed.data.synced) || true;
+    }
+
+    const channel = supabase.channel('paredaogk-realtime-matches');
+    await channel
+      .send({
+        type: 'broadcast',
+        event: 'goalkeeper_cancelled_match',
+        payload: {
+          match: reopenedMatch,
+          notification: contractorNotification,
+          goalkeeperName: gkName,
+          reason: cleanReason,
+          details: cleanDetails,
+        },
+      })
+      .catch(() => undefined);
+
+    await channel
+      .send({
+        type: 'broadcast',
+        event: 'match_operational_status',
+        payload: reopenedMatch,
+      })
+      .catch(() => undefined);
+
+    await channel
+      .send({
+        type: 'broadcast',
+        event: 'new_match_radar_alert',
+        payload: reopenedMatch,
+      })
+      .catch(() => undefined);
+
+    if (isSupabaseConfigured) {
+      const { error: matchErr } = await supabase
+        .from('matches')
+        .update({
+          status: 'searching',
+          goalkeeper_id: null,
+          goalkeeper_name: 'Aguardando Substituto (Radar 30 km)',
+          goalkeeper_cancelled: true,
+          checkin_2h_confirmed: false,
+          en_route_45m_confirmed: false,
+          notes: reopenedMatch.notes,
+        })
+        .eq('id', params.match.id);
+
+      if (params.match.organizerId && params.match.organizerId !== 'usr-guest') {
+        await supabase.from('notifications').upsert([
+          {
+            id: contractorNotification.id,
+            user_id: params.match.organizerId,
+            category: 'match',
+            title: contractorNotification.title,
+            description: fullDescription,
+            read: false,
+            created_at: nowIso,
+          },
+        ]);
+      }
+
+      if (!matchErr) synced = true;
+    }
+  } catch (err) {
+    console.warn('[cancelGoalkeeperParticipationInSupabase warning]', err);
+  }
+
+  playWhistleNotification();
+  return {
+    success: true,
+    synced,
+    reopenedMatch,
+    contractorNotification,
+  };
 }
 
 

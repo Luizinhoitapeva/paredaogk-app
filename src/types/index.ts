@@ -160,7 +160,7 @@ export interface MatchBooking {
   goalkeeperPayout?: number;
   pricingTier?: PricingTierCode;
   cashbackEarned: number;
-  status: 'searching' | 'confirmed' | 'in_progress' | 'completed' | 'cancelled';
+  status: 'searching' | 'confirmed' | 'custody_confirmed' | 'in_progress' | 'completed' | 'cancelled';
   competitiveLevel: 'Resenha / Amigável' | 'Competitivo' | 'Varzea / Torneio' | GameDifficultyLevel;
   gameLevel?: GameDifficultyLevel;
   goalkeeperSlotsCount?: 1 | 2;
@@ -191,6 +191,10 @@ export interface MatchBooking {
   enRoute20mConfirmed?: boolean;
   enRoute20mAt?: string;
   goalkeeperCancelled?: boolean;
+  goalkeeperCancelReason?: string;
+  goalkeeperCancelDetails?: string;
+  goalkeeperCancelledAt?: string;
+  previousGoalkeeperName?: string;
   sosTriggered?: boolean;
   sosTriggeredAt?: string;
   sosBonus?: number;
@@ -281,7 +285,11 @@ export interface NotificationItem {
   actionTab?: 'home' | 'chat' | 'wallet' | 'notifications';
   matchId?: string;
   arenaName?: string;
-  actionType?: 'confirm_en_route' | 'accept_match';
+  actionType?:
+    | 'confirm_en_route'
+    | 'accept_match'
+    | 'view_confirmed_match'
+    | 'view_cancelled_match';
 }
 
 export interface Transaction {

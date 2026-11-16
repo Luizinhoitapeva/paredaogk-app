@@ -33,6 +33,7 @@ interface MatchHistoryModalProps {
   onSaveAiFeedback?: (matchId: string, feedback: PostMatchAiFeedbackResult) => void;
   onReinviteNextWeek?: (match: MatchBooking) => Promise<void>;
   onQuickTriggerSos?: (match: MatchBooking) => void;
+  onOpenGoalkeeperCancelModal?: (match: MatchBooking) => void;
   onOpenPdfReport?: (params: {
     scope: ReportScope;
     selectedMatch?: MatchBooking | null;
@@ -49,6 +50,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
   onSaveAiFeedback,
   onReinviteNextWeek,
   onQuickTriggerSos,
+  onOpenGoalkeeperCancelModal,
   onOpenPdfReport,
 }) => {
   const [filter, setFilter] = useState<'all' | 'confirmed' | 'completed'>('all');
@@ -73,7 +75,13 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
   };
 
   const filteredMatches = matches.filter((m) => {
-    if (filter === 'confirmed') return m.status === 'confirmed';
+    if (filter === 'confirmed') {
+      return (
+        m.status === 'confirmed' ||
+        m.status === 'custody_confirmed' ||
+        m.status === 'in_progress'
+      );
+    }
     if (filter === 'completed') return m.status === 'completed';
     return true;
   });
@@ -200,27 +208,47 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
                     )}
                     <div>
                       <h4 className="font-bold text-sm text-slate-900 dark:text-white">
-                        {match.goalkeeperName}
+                        {match.arenaName}
                       </h4>
                       <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5 mt-0.5">
-                        <MapPin className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" />
-                        <span>{match.arenaName}</span>
+                        <MapPin className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                        <span>{match.address || match.city || 'Itapeva - SP'}</span>
+                      </div>
+                      <div className="text-[11px] text-slate-600 dark:text-slate-300 mt-0.5">
+                        Capitão: <strong>{match.organizerName || 'Contratante'}</strong> · Goleiro:{' '}
+                        <strong>{match.goalkeeperName || 'Aguardando Aceite'}</strong>
                       </div>
                     </div>
                   </div>
 
-                  <div className="text-right">
+                  <div className="text-right shrink-0">
                     <span
                       className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-                        match.status === 'confirmed'
+                        match.status === 'confirmed' ||
+                        match.status === 'custody_confirmed' ||
+                        match.status === 'in_progress'
                           ? 'bg-emerald-500/15 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30'
+                          : match.status === 'searching'
+                          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30'
                           : 'bg-sky-500/15 dark:bg-sky-500/20 text-sky-700 dark:text-sky-400 border border-sky-500/30'
                       }`}
                     >
-                      {match.status === 'confirmed' ? 'Confirmado' : 'Concluído'}
+                      {match.status === 'confirmed' ||
+                      match.status === 'custody_confirmed' ||
+                      match.status === 'in_progress'
+                        ? match.paymentStatus === 'paid'
+                          ? '✓ Custódia Garantida'
+                          : 'Confirmado'
+                        : match.status === 'searching'
+                        ? 'No Radar'
+                        : 'Concluído'}
                     </span>
                     <div className="font-mono font-bold text-sm text-emerald-600 dark:text-emerald-400 mt-1">
-                      {formatCurrency(match.price)}
+                      {formatCurrency(
+                        currentUser.role === 'goleiro'
+                          ? match.goalkeeperPayout ?? match.price
+                          : match.price
+                      )}
                     </div>
                   </div>
                 </div>
@@ -241,7 +269,10 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
                 </div>
 
                 {/* Action / Evaluation Area */}
-                {match.status === 'confirmed' || match.status === 'searching' ? (
+                {match.status === 'confirmed' ||
+                match.status === 'custody_confirmed' ||
+                match.status === 'in_progress' ||
+                match.status === 'searching' ? (
                   <div className="space-y-2 pt-1">
                     <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
                       <span
@@ -255,22 +286,45 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
                       </span>
                       <span
                         className={`px-2 py-0.5 rounded-full border ${
-                          match.enRoute45mConfirmed
+                          match.enRoute45mConfirmed || match.enRoute20mConfirmed
                             ? 'bg-sky-500/15 text-sky-700 dark:text-[#38bdf8] border-sky-500/30'
                             : 'bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-800'
                         }`}
                       >
-                        {match.enRoute45mConfirmed ? '🚗 A caminho (45m)' : '⏳ Status A caminho (45m)'}
+                        {match.enRoute45mConfirmed || match.enRoute20mConfirmed
+                          ? '🚗 A caminho'
+                          : '⏳ Status A caminho'}
                       </span>
                     </div>
 
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <span className="text-[11px] text-slate-500 dark:text-slate-400 italic">
-                        {match.sosTriggered
+                        {match.goalkeeperCancelled
+                          ? `Goleiro cancelou${match.goalkeeperCancelReason ? ` (${match.goalkeeperCancelReason})` : ''}. Vaga reaberta no radar de 30 km.`
+                          : match.sosTriggered
                           ? 'Alerta SOS disparado para goleiros próximos.'
-                          : 'Goleiro escalado. Chegada prevista 15min antes.'}
+                          : match.paymentStatus === 'paid'
+                          ? 'Custódia garantida. Chegada prevista 15min antes.'
+                          : 'Aguardando confirmação de custódia.'}
                       </span>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center flex-wrap gap-2">
+                        {currentUser.role === 'goleiro' &&
+                          !match.goalkeeperCancelled &&
+                          (match.status === 'confirmed' ||
+                            match.status === 'custody_confirmed' ||
+                            match.status === 'in_progress') &&
+                          onOpenGoalkeeperCancelModal && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onClose();
+                                onOpenGoalkeeperCancelModal(match);
+                              }}
+                              className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-800 dark:text-amber-300 text-xs font-bold cursor-pointer transition-colors"
+                            >
+                              Cancelar Participação / Imprevisto
+                            </button>
+                          )}
                         {currentUser.role === 'contratante' && onQuickTriggerSos && (
                           <button
                             type="button"
@@ -292,7 +346,11 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
                           className="px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
                         >
                           <MessageCircle className="w-3.5 h-3.5" />
-                          <span>Abrir Chat com GK</span>
+                          <span>
+                            {currentUser.role === 'goleiro'
+                              ? 'Abrir Chat com Capitão'
+                              : 'Abrir Chat com GK'}
+                          </span>
                         </button>
                       </div>
                     </div>
