@@ -27,8 +27,13 @@ import {
   confirmGoalkeeperEnRoute20mInSupabase,
   cancelGoalkeeperParticipationInSupabase,
   formatGoalkeeperCancellationMessage,
+  fetchNotificationsFromSupabase,
 } from './lib/supabaseClient';
-import { shouldTrigger20MinEnRouteAlert } from './utils/geoMatchmaking';
+import {
+  shouldTrigger20MinEnRouteAlert,
+  hasDispatchedMatchAlert,
+  markDispatchedMatchAlert,
+} from './utils/geoMatchmaking';
 import { OnboardingCarousel } from './components/OnboardingCarousel';
 import { AuthModal } from './components/AuthModal';
 import { TopHeader } from './components/TopHeader';
@@ -206,10 +211,9 @@ export default function App() {
   const [selectedMatchForReview, setSelectedMatchForReview] = useState<MatchBooking | null>(null);
   const [cancelModalMatch, setCancelModalMatch] = useState<MatchBooking | null>(null);
 
-  // Active bookings & counts (clean zero starting state)
+  // Active bookings & counts (clean zero starting state; contador calculado exclusivamente sobre notificações únicas não lidas)
   const [recentBooking, setRecentBooking] = useState<MatchBooking | null>(null);
   const [unreadMessages, setUnreadMessages] = useState(0);
-  const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [localNotifications, setLocalNotifications] = useState<NotificationItem[]>([]);
   const [pushToastBanner, setPushToastBanner] = useState<{
     id: string;
@@ -377,9 +381,20 @@ export default function App() {
           prev.forEach((m) => map.set(m.id, m));
           incoming.forEach((rm) => {
             const existing = map.get(rm.id);
-            map.set(rm.id, existing ? { ...existing, ...rm, candidates: rm.candidates || existing.candidates } : rm);
+            map.set(
+              rm.id,
+              existing
+                ? {
+                    ...existing,
+                    ...rm,
+                    candidates: rm.candidates || existing.candidates,
+                    enRoute20mNotified: Boolean(existing.enRoute20mNotified || rm.enRoute20mNotified),
+                    enRoute20mConfirmed: Boolean(existing.enRoute20mConfirmed || rm.enRoute20mConfirmed),
+                  }
+                : rm
+            );
           });
-          return Array.from(map.values());
+          return Array.from(map.values()).slice(0, 60);
         });
       }
       setRadarRefreshTick((prev) => prev + 1);
@@ -482,6 +497,107 @@ export default function App() {
 
   const currentUserRef = useRef(currentUser);
   currentUserRef.current = currentUser;
+  const matchesRef = useRef(matches);
+  matchesRef.current = matches;
+
+  const MAX_LOCAL_NOTIFICATIONS = 40;
+  const seenNotificationKeysRef = useRef<Set<string>>(new Set());
+  const dispatchedEnRouteKeysRef = useRef<Set<string>>(new Set());
+  const inFlightEnRouteKeysRef = useRef<Set<string>>(new Set());
+  const seenRealtimeCallAlertsRef = useRef<Set<string>>(new Set());
+
+  const getNotificationDedupeKey = (item: NotificationItem): string => {
+    const cleanTitle = (item.title || '').trim().toLowerCase();
+    const cleanDesc = (item.description || '').trim().toLowerCase();
+    if (
+      item.id.startsWith('notif-20m-') ||
+      cleanTitle.includes('você está a caminho do jogo') ||
+      cleanDesc.includes('faltam 20 minutos para o início')
+    ) {
+      return `20m:${item.matchId || cleanTitle}:${cleanDesc}`;
+    }
+    if (item.matchId && item.actionType) {
+      return `${item.actionType}:${item.matchId}`;
+    }
+    return `${item.category}:${cleanTitle}:${cleanDesc}`;
+  };
+
+  const pushUniqueLocalNotification = (rawItem: NotificationItem): boolean => {
+    const semKey = getNotificationDedupeKey(rawItem);
+    if (
+      seenNotificationKeysRef.current.has(rawItem.id) ||
+      seenNotificationKeysRef.current.has(semKey)
+    ) {
+      return false;
+    }
+    seenNotificationKeysRef.current.add(rawItem.id);
+    seenNotificationKeysRef.current.add(semKey);
+
+    setLocalNotifications((prev) => {
+      const exists = prev.some(
+        (n) => n.id === rawItem.id || getNotificationDedupeKey(n) === semKey
+      );
+      if (exists) return prev;
+      return [rawItem, ...prev].slice(0, MAX_LOCAL_NOTIFICATIONS);
+    });
+    return true;
+  };
+
+  const mergeSyncedNotifications = (rows: NotificationItem[]) => {
+    if (!Array.isArray(rows) || rows.length === 0) return;
+    setLocalNotifications((prev) => {
+      const byId = new Map<string, NotificationItem>();
+      const bySem = new Set<string>();
+      const register = (n: NotificationItem) => {
+        const semKey = getNotificationDedupeKey(n);
+        if (byId.has(n.id) || bySem.has(semKey)) return;
+        byId.set(n.id, n);
+        bySem.add(semKey);
+        seenNotificationKeysRef.current.add(n.id);
+        seenNotificationKeysRef.current.add(semKey);
+      };
+      prev.forEach(register);
+      rows.forEach(register);
+      return Array.from(byId.values()).slice(0, MAX_LOCAL_NOTIFICATIONS);
+    });
+  };
+
+  const handleMarkAllNotificationsRead = () => {
+    setLocalNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+  };
+
+  const handleToggleNotificationRead = (id: string) => {
+    setLocalNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, read: !n.read } : n))
+    );
+  };
+
+  // Contador da barra de navegação: reflete exclusivamente notificações únicas e não lidas
+  const unreadNotifications = useMemo(
+    () => localNotifications.filter((n) => !n.read).length,
+    [localNotifications]
+  );
+
+  // Sincronização única de notificações reais do Supabase ao trocar de usuário (sem loops)
+  useEffect(() => {
+    seenNotificationKeysRef.current.clear();
+    seenRealtimeCallAlertsRef.current.clear();
+    setLocalNotifications([]);
+    if (!currentUser.id || currentUser.id === 'usr-guest') return;
+
+    let active = true;
+    fetchNotificationsFromSupabase(currentUser.id)
+      .then((rows) => {
+        if (active) {
+          mergeSyncedNotifications(rows);
+        }
+      })
+      .catch((err) => console.warn('[Initial Notifications Sync]', err));
+
+    return () => {
+      active = false;
+    };
+  }, [currentUser.id]);
 
   const approvedArenas = useMemo(
     () => arenas.filter((a) => a.status === 'approved'),
@@ -519,13 +635,9 @@ export default function App() {
       actionType: 'view_confirmed_match',
     };
 
-    setLocalNotifications((prev) => {
-      const filtered = prev.filter((n) => n.id !== item.id);
-      return [item, ...filtered];
-    });
-    setUnreadNotifications((prev) => prev + 1);
+    const isNew = pushUniqueLocalNotification(item);
 
-    if (params.showPushToast !== false) {
+    if (isNew && params.showPushToast !== false) {
       setPushToastBanner({
         id: notifId,
         title,
@@ -582,13 +694,9 @@ export default function App() {
       actionType: 'view_cancelled_match',
     };
 
-    setLocalNotifications((prev) => {
-      const filtered = prev.filter((n) => n.id !== item.id);
-      return [item, ...filtered];
-    });
-    setUnreadNotifications((prev) => prev + 1);
+    const isNew = pushUniqueLocalNotification(item);
 
-    if (params.showPushToast !== false) {
+    if (isNew && params.showPushToast !== false) {
       setPushToastBanner({
         id: notifId,
         title,
@@ -688,20 +796,18 @@ export default function App() {
         }
 
         if (newRecord?.id) {
-          setLocalNotifications((prev) => [
-            {
-              id: String(newRecord.id),
-              title: titleText,
-              description: descText,
-              timestamp: 'Agora',
-              read: false,
-              category: (newRecord.category || 'match') as NotificationItem['category'],
-              actionTab: 'home',
-            },
-            ...prev.filter((n) => n.id !== String(newRecord.id)),
-          ]);
+          pushUniqueLocalNotification({
+            id: String(newRecord.id),
+            title: titleText,
+            description: descText,
+            timestamp: 'Agora',
+            read: Boolean(newRecord.read),
+            category: (newRecord.category || 'match') as NotificationItem['category'],
+            matchId: newRecord.match_id || newRecord.matchId,
+            arenaName: newRecord.arena_name || newRecord.arenaName,
+            actionTab: 'home',
+          });
         }
-        setUnreadNotifications((prev) => prev + 1);
       },
       onMatchChange: (matchRecord) => {
         if (!matchRecord) return;
@@ -710,7 +816,7 @@ export default function App() {
           if (exists) {
             return prev.map((m) => (m.id === matchRecord.id ? { ...m, ...matchRecord } : m));
           }
-          return [matchRecord, ...prev];
+          return [matchRecord, ...prev].slice(0, 60);
         });
       },
       onGoalkeeperCallAlert: (callData) => {
@@ -760,46 +866,63 @@ export default function App() {
           notes: callData.notes || 'Partida publicada via Radar ParedãoGK Itapeva.',
         };
 
-        const isOwnCreatedMatch = formattedBooking.organizerId === activeUser.id;
-        const isCancelledByCurrentGk =
-          formattedBooking.goalkeeperCancelled &&
-          formattedBooking.previousGoalkeeperName &&
-          formattedBooking.previousGoalkeeperName.toLowerCase() === activeUser.name.toLowerCase();
+        const callAlertDedupeKey = `${formattedBooking.id}:${resolvedStatus}:${resolvedPaymentStatus}:${Boolean(callData.sosTriggered)}`;
+        const alreadyHandledCallAlert = seenRealtimeCallAlertsRef.current.has(callAlertDedupeKey);
+        if (!alreadyHandledCallAlert) {
+          seenRealtimeCallAlertsRef.current.add(callAlertDedupeKey);
 
-        if (
-          !isOwnCreatedMatch &&
-          !isCancelledByCurrentGk &&
-          (activeUser.role === 'goleiro' ||
-            formattedBooking.organizerId === 'org-realtime-test' ||
-            Boolean(callData.sosTriggered))
-        ) {
-          setRealtimeAlertBooking(formattedBooking);
-          setIsCallAlertOpen(true);
+          const isOwnCreatedMatch = formattedBooking.organizerId === activeUser.id;
+          const isCancelledByCurrentGk =
+            formattedBooking.goalkeeperCancelled &&
+            formattedBooking.previousGoalkeeperName &&
+            formattedBooking.previousGoalkeeperName.toLowerCase() === activeUser.name.toLowerCase();
+
+          if (
+            !isOwnCreatedMatch &&
+            !isCancelledByCurrentGk &&
+            (activeUser.role === 'goleiro' ||
+              formattedBooking.organizerId === 'org-realtime-test' ||
+              Boolean(callData.sosTriggered))
+          ) {
+            setRealtimeAlertBooking(formattedBooking);
+            setIsCallAlertOpen(true);
+          }
+
+          if (
+            resolvedPaymentStatus === 'paid' &&
+            (resolvedStatus === 'confirmed' || resolvedStatus === 'custody_confirmed') &&
+            (activeUser.role === 'goleiro' || formattedBooking.goalkeeperId === activeUser.id)
+          ) {
+            triggerNativeEscalationNotification({
+              id: `notif-esc-${formattedBooking.id}`,
+              matchId: formattedBooking.id,
+              arenaName: formattedBooking.arenaName,
+              showPushToast: true,
+            });
+          } else if (!isOwnCreatedMatch && activeUser.role === 'goleiro') {
+            pushUniqueLocalNotification({
+              id: `notif-radar-${formattedBooking.id}`,
+              title: `📡 Nova Convocação no Radar · ${formattedBooking.arenaName}`,
+              description: `${formattedBooking.date} · ${formattedBooking.time} (${formattedBooking.modality}). Toque para conferir no radar de 30 km.`,
+              timestamp: 'Agora',
+              read: false,
+              category: 'radar',
+              matchId: formattedBooking.id,
+              arenaName: formattedBooking.arenaName,
+              actionTab: 'home',
+              actionType: 'accept_match',
+            });
+          }
+
+          setRecentBooking(formattedBooking);
         }
-
-        if (
-          resolvedPaymentStatus === 'paid' &&
-          (resolvedStatus === 'confirmed' || resolvedStatus === 'custody_confirmed') &&
-          (activeUser.role === 'goleiro' || formattedBooking.goalkeeperId === activeUser.id)
-        ) {
-          triggerNativeEscalationNotification({
-            id: `notif-esc-${formattedBooking.id}`,
-            matchId: formattedBooking.id,
-            arenaName: formattedBooking.arenaName,
-            showPushToast: true,
-          });
-        } else {
-          setUnreadNotifications((prev) => prev + 1);
-        }
-
-        setRecentBooking(formattedBooking);
 
         // Atualizar lista de partidas sem duplicar
         setMatches((prev) => {
           if (prev.some((m) => m.id === formattedBooking.id)) {
             return prev.map((m) => (m.id === formattedBooking.id ? { ...m, ...formattedBooking } : m));
           }
-          return [formattedBooking, ...prev];
+          return [formattedBooking, ...prev].slice(0, 60);
         });
       },
       onOperationalStatusChange: (matchUpdate) => {
@@ -940,7 +1063,16 @@ export default function App() {
   // Handle community arena submission & admin moderation
   const handleArenaSubmitted = (newArena: ArenaField) => {
     setArenas((prev) => [newArena, ...prev.filter((a) => a.id !== newArena.id)]);
-    setUnreadNotifications((prev) => prev + 1);
+    pushUniqueLocalNotification({
+      id: `notif-arena-sub-${newArena.id}`,
+      title: `🏟️ Nova Arena Sugerida · ${newArena.name}`,
+      description: 'Arena enviada para moderação oficial do ParedãoGK.',
+      timestamp: 'Agora',
+      read: false,
+      category: 'system',
+      arenaName: newArena.name,
+      actionTab: 'home',
+    });
   };
 
   const handleArenaModerated = (
@@ -958,7 +1090,15 @@ export default function App() {
       )
     );
     if (action === 'approve') {
-      setUnreadNotifications((prev) => prev + 1);
+      pushUniqueLocalNotification({
+        id: `notif-arena-app-${arenaId}`,
+        title: '✅ Arena Aprovada no Radar Oficial',
+        description: 'A arena foi aprovada e já está disponível para convocações.',
+        timestamp: 'Agora',
+        read: false,
+        category: 'system',
+        actionTab: 'home',
+      });
     }
   };
 
@@ -1015,7 +1155,17 @@ export default function App() {
     }
 
     if (updates.goalkeeperCancelled) {
-      setUnreadNotifications((prev) => prev + 1);
+      pushUniqueLocalNotification({
+        id: `notif-safety-cancel-${match.id}`,
+        title: `⚠️ Vaga Reaberta · ${match.arenaName}`,
+        description: 'Participação cancelada na linha do tempo de segurança.',
+        timestamp: 'Agora',
+        read: false,
+        category: 'match',
+        matchId: match.id,
+        arenaName: match.arenaName,
+        actionTab: 'home',
+      });
     }
 
     updateMatchSafetyTimeline({ match, ...updates }).catch((err) =>
@@ -1084,20 +1234,66 @@ export default function App() {
     if (recentBooking?.id === match.id) {
       setRecentBooking(updatedMatch);
     }
-    setUnreadNotifications((prev) => prev + 1);
+    pushUniqueLocalNotification({
+      id: `notif-accept-${match.id}-${currentUser.id}`,
+      title: `🧤 Candidatura Enviada · ${match.arenaName}`,
+      description: `Você aceitou a convocação para ${match.date} (${match.time}). Aguarde a confirmação da custódia pelo capitão.`,
+      timestamp: 'Agora',
+      read: false,
+      category: 'match',
+      matchId: match.id,
+      arenaName: match.arenaName,
+      actionTab: 'home',
+    });
   };
 
   // Disparo da pergunta ativa 20 minutos antes: "Você está a caminho do jogo em [Local]?"
+  // Protegido por trava rigorosa de idempotência (memória + localStorage + estado da partida)
   const handleTrigger20MinEnRouteAlert = async (match: MatchBooking) => {
-    const { updatedMatch } = await trigger20MinEnRouteNotificationInSupabase({
-      match,
-      goalkeeperUserId: currentUser.id,
-    });
-    setMatches((prev) => prev.map((m) => (m.id === match.id ? updatedMatch : m)));
-    if (recentBooking?.id === match.id) {
-      setRecentBooking(updatedMatch);
+    const activeUserId = currentUserRef.current.id || 'anon';
+    const alertKey = `${activeUserId}:${match.id}`;
+
+    if (
+      !match?.id ||
+      match.enRoute20mNotified ||
+      match.enRoute20mConfirmed ||
+      dispatchedEnRouteKeysRef.current.has(alertKey) ||
+      inFlightEnRouteKeysRef.current.has(alertKey) ||
+      hasDispatchedMatchAlert('enroute20m', match.id, activeUserId)
+    ) {
+      return;
     }
-    setUnreadNotifications((prev) => prev + 1);
+
+    inFlightEnRouteKeysRef.current.add(alertKey);
+    dispatchedEnRouteKeysRef.current.add(alertKey);
+    markDispatchedMatchAlert('enroute20m', match.id, activeUserId);
+
+    try {
+      const { updatedMatch } = await trigger20MinEnRouteNotificationInSupabase({
+        match,
+        goalkeeperUserId: activeUserId,
+      });
+
+      setMatches((prev) => prev.map((m) => (m.id === match.id ? updatedMatch : m)));
+      if (recentBooking?.id === match.id) {
+        setRecentBooking(updatedMatch);
+      }
+
+      pushUniqueLocalNotification({
+        id: `notif-20m-${match.id}`,
+        title: `⏰ Você está a caminho do jogo em ${match.arenaName}?`,
+        description: `Faltam 20 minutos para o início (${match.time}). Toque em SIM para atualizar o painel do contratante para "A Caminho".`,
+        timestamp: 'Agora',
+        read: false,
+        category: 'match',
+        matchId: match.id,
+        arenaName: match.arenaName,
+        actionTab: 'home',
+        actionType: 'confirm_en_route',
+      });
+    } finally {
+      inFlightEnRouteKeysRef.current.delete(alertKey);
+    }
   };
 
   // Confirmação "Sim" -> atualiza status operacional para "A Caminho" em tempo real
@@ -1110,22 +1306,53 @@ export default function App() {
     if (recentBooking?.id === match.id) {
       setRecentBooking(updatedMatch);
     }
-    setUnreadNotifications((prev) => prev + 1);
+    pushUniqueLocalNotification({
+      id: `notif-enroute-ack-${match.id}`,
+      title: `🚗 Check-in A Caminho Confirmado · ${match.arenaName}`,
+      description: `Status atualizado para "A Caminho" no painel do capitão para o jogo de ${match.time}.`,
+      timestamp: 'Agora',
+      read: false,
+      category: 'match',
+      matchId: match.id,
+      arenaName: match.arenaName,
+      actionTab: 'home',
+    });
   };
 
   // Verificação automática periódica (a cada 30s) para jogos dentro da janela de 20 minutos
+  // Não depende de [matches] para evitar re-disparo síncrono em cascata ao atualizar estado
   useEffect(() => {
     const checkWindow = () => {
-      matches.forEach((m) => {
-        if (shouldTrigger20MinEnRouteAlert(m)) {
+      const activeUser = currentUserRef.current;
+      if (!activeUser?.id || activeUser.id === 'usr-guest' || activeUser.role !== 'goleiro') {
+        return;
+      }
+      const normalizedUserName = (activeUser.name || '').trim().toLowerCase();
+      const currentMatches = matchesRef.current;
+
+      currentMatches.forEach((m) => {
+        const isAssignedToCurrentGk =
+          m.goalkeeperId === activeUser.id ||
+          Boolean(m.slots?.some((s) => s.goalkeeperId === activeUser.id)) ||
+          (Boolean(normalizedUserName) &&
+            Boolean(m.goalkeeperName) &&
+            m.goalkeeperName!.toLowerCase().includes(normalizedUserName));
+
+        if (!isAssignedToCurrentGk) return;
+
+        if (shouldTrigger20MinEnRouteAlert(m, new Date(), activeUser.id)) {
           handleTrigger20MinEnRouteAlert(m);
         }
       });
     };
-    checkWindow();
+
+    const initialTimer = setTimeout(checkWindow, 1200);
     const interval = setInterval(checkWindow, 30000);
-    return () => clearInterval(interval);
-  }, [matches]);
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [currentUser.id, currentUser.role]);
 
   // Sistema de Alerta SOS (Substituição Relâmpago)
   const handleTriggerSos = async (
@@ -1158,7 +1385,17 @@ export default function App() {
     if (recentBooking?.id === match.id) {
       setRecentBooking(sosUpdatedMatch);
     }
-    setUnreadNotifications((prev) => prev + 1);
+    pushUniqueLocalNotification({
+      id: `notif-sos-${match.id}`,
+      title: `🚨 Alerta SOS Disparado · ${match.arenaName}`,
+      description: `Substituição relâmpago enviada para ${result.notifiedGoalkeepers.length} goleiro(s) no raio de ${radiusKm} km.`,
+      timestamp: 'Agora',
+      read: false,
+      category: 'radar',
+      matchId: match.id,
+      arenaName: match.arenaName,
+      actionTab: 'home',
+    });
 
     return result;
   };
@@ -1171,15 +1408,41 @@ export default function App() {
       favoriteGoalkeeperIds,
     });
 
-    setMatches((prev) => [newBooking, ...prev]);
+    setMatches((prev) => [newBooking, ...prev].slice(0, 60));
     setRecentBooking(newBooking);
-    setUnreadNotifications((prev) => prev + 1);
+    pushUniqueLocalNotification({
+      id: `notif-reinvite-${newBooking.id}`,
+      title: `⭐ Reconvocação Semanal Enviada · ${newBooking.arenaName}`,
+      description: `Convite prioritário disparado para ${newBooking.date} (${newBooking.time}).`,
+      timestamp: 'Agora',
+      read: false,
+      category: 'match',
+      matchId: newBooking.id,
+      arenaName: newBooking.arenaName,
+      actionTab: 'home',
+    });
   };
 
   // Handle booking published (free radar) or confirmed (paid custody)
   const handleBookingConfirmed = (booking: MatchBooking) => {
     setRecentBooking(booking);
-    setUnreadNotifications((prev) => prev + 1);
+    pushUniqueLocalNotification({
+      id: `notif-booking-${booking.id}`,
+      title:
+        booking.paymentStatus === 'paid'
+          ? `🛡️ Convocação Confirmada · ${booking.arenaName}`
+          : `📡 Partida Publicada no Radar · ${booking.arenaName}`,
+      description:
+        booking.paymentStatus === 'paid'
+          ? `Custódia garantida para ${booking.date} (${booking.time}).`
+          : `Radar de 30 km ativado gratuitamente para ${booking.date} (${booking.time}).`,
+      timestamp: 'Agora',
+      read: false,
+      category: 'match',
+      matchId: booking.id,
+      arenaName: booking.arenaName,
+      actionTab: 'home',
+    });
 
     if (booking.paymentStatus === 'paid') {
       setCurrentUser((prev) => ({
@@ -1194,7 +1457,7 @@ export default function App() {
       const exists = prev.some((m) => m.id === booking.id);
       return exists
         ? prev.map((m) => (m.id === booking.id ? booking : m))
-        : [booking, ...prev];
+        : [booking, ...prev].slice(0, 60);
     });
   };
 
@@ -1349,8 +1612,17 @@ export default function App() {
       );
     }
 
-    // 3. Notificar o usuário com alerta de sucesso
-    setUnreadNotifications((prev) => prev + 1);
+    // 3. Notificar o usuário com alerta de sucesso (idempotente)
+    pushUniqueLocalNotification({
+      id: `notif-review-${bookingId}`,
+      title: `⭐ Avaliação Registrada (${rating}★)`,
+      description: 'Obrigado! Sua avaliação pós-jogo já foi contabilizada no ranking.',
+      timestamp: 'Agora',
+      read: false,
+      category: 'match',
+      matchId: bookingId,
+      actionTab: 'home',
+    });
   };
 
   // Handle sending real messages in conversation
@@ -1395,7 +1667,15 @@ export default function App() {
       walletBalance: Math.max(0, prev.walletBalance - amount),
       cashbackBalance: prev.cashbackBalance + cashbackEarned,
     }));
-    setUnreadNotifications((prev) => prev + 1);
+    pushUniqueLocalNotification({
+      id: `notif-futshop-${Date.now().toString().slice(-6)}`,
+      title: '🛍️ Pedido Futshop Confirmado',
+      description: `Compra de R$ ${amount.toFixed(2)} realizada com +R$ ${cashbackEarned.toFixed(2)} de cashback.`,
+      timestamp: 'Agora',
+      read: false,
+      category: 'wallet',
+      actionTab: 'wallet',
+    });
   };
 
   // Handle Avatar Update (Save local + offline + Supabase profile)
@@ -1708,6 +1988,9 @@ export default function App() {
             onNavigateTab={(tab) => setCurrentTab(tab)}
             onOpenConfirmedMatchDetails={() => navigateToConfirmedMatchDetails()}
             onOpenCancelledMatchDetails={() => navigateToCancelledMatchDetails()}
+            onMarkAllRead={handleMarkAllNotificationsRead}
+            onToggleNotificationRead={handleToggleNotificationRead}
+            onRemoteNotificationsSynced={mergeSyncedNotifications}
             onConfirmEnRouteFromNotification={() => {
               const target =
                 matches.find(
@@ -1751,7 +2034,6 @@ export default function App() {
         onChangeTab={(tab) => {
           setCurrentTab(tab);
           if (tab === 'chat') setUnreadMessages(0);
-          if (tab === 'notifications') setUnreadNotifications(0);
         }}
         unreadMessagesCount={unreadMessages}
         unreadNotificationsCount={unreadNotifications}

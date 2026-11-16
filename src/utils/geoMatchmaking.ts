@@ -120,23 +120,93 @@ export function computeEndTimeFromStartAndDuration(
   return `${pad(startH)}:${pad(startM)} - ${pad(endH)}:${pad(endM)}`;
 }
 
+const DISPATCHED_ALERTS_STORAGE_KEY = 'paredaogk-dispatched-alerts-v1';
+const MAX_DISPATCHED_ALERTS_CACHE = 100;
+
+function readDispatchedAlertsMap(): Record<string, number> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(DISPATCHED_ALERTS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function buildMatchAlertStorageKey(
+  eventType: string,
+  matchId: string,
+  userId?: string
+): string {
+  return `${eventType}:${userId || 'anon'}:${matchId}`;
+}
+
+export function hasDispatchedMatchAlert(
+  eventType: string,
+  matchId: string,
+  userId?: string
+): boolean {
+  if (!matchId) return false;
+  const map = readDispatchedAlertsMap();
+  const specificKey = buildMatchAlertStorageKey(eventType, matchId, userId);
+  const globalKey = buildMatchAlertStorageKey(eventType, matchId);
+  return Boolean(map[specificKey] || map[globalKey]);
+}
+
+export function markDispatchedMatchAlert(
+  eventType: string,
+  matchId: string,
+  userId?: string
+): void {
+  if (typeof window === 'undefined' || !matchId) return;
+  try {
+    const map = readDispatchedAlertsMap();
+    const key = buildMatchAlertStorageKey(eventType, matchId, userId);
+    map[key] = Date.now();
+    const entries = Object.entries(map);
+    if (entries.length > MAX_DISPATCHED_ALERTS_CACHE) {
+      entries.sort((a, b) => b[1] - a[1]);
+      const pruned = Object.fromEntries(entries.slice(0, MAX_DISPATCHED_ALERTS_CACHE));
+      localStorage.setItem(DISPATCHED_ALERTS_STORAGE_KEY, JSON.stringify(pruned));
+    } else {
+      localStorage.setItem(DISPATCHED_ALERTS_STORAGE_KEY, JSON.stringify(map));
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 /**
  * Verifica se a partida confirmada está a 20 minutos (ou menos) do horário agendado
  * para acionar a notificação "Você está a caminho do jogo em [Local]?".
+ * Possui trava rigorosa de idempotência para nunca disparar mais de uma vez por partida/usuário.
  */
 export function shouldTrigger20MinEnRouteAlert(
   match: MatchBooking,
-  now: Date = new Date()
+  now: Date = new Date(),
+  userId?: string
 ): boolean {
+  if (!match || !match.id) return false;
+
+  const isConfirmedMatch =
+    match.status === 'confirmed' ||
+    match.status === 'custody_confirmed' ||
+    match.status === 'in_progress';
+
   if (
-    !match ||
-    match.status === 'completed' ||
-    match.status === 'cancelled' ||
+    !isConfirmedMatch ||
     match.goalkeeperCancelled ||
+    match.enRoute20mNotified ||
     match.enRoute20mConfirmed ||
     match.enRoute45mConfirmed ||
     match.operationalStatus === 'en_route'
   ) {
+    return false;
+  }
+
+  if (hasDispatchedMatchAlert('enroute20m', match.id, userId)) {
     return false;
   }
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   GkBellIcon as Bell,
   GkShieldIcon as Shield,
@@ -19,6 +19,27 @@ interface NotificationsTabProps {
   onConfirmEnRouteFromNotification?: () => void;
   onOpenConfirmedMatchDetails?: (matchId?: string) => void;
   onOpenCancelledMatchDetails?: (matchId?: string) => void;
+  onMarkAllRead?: () => void;
+  onToggleNotificationRead?: (id: string) => void;
+  onRemoteNotificationsSynced?: (rows: NotificationItem[]) => void;
+}
+
+const MAX_RENDERED_NOTIFICATIONS = 40;
+
+function getNotificationSemanticKey(item: NotificationItem): string {
+  const cleanTitle = (item.title || '').trim().toLowerCase();
+  const cleanDesc = (item.description || '').trim().toLowerCase();
+  const is20MinAlert =
+    item.id.startsWith('notif-20m-') ||
+    cleanTitle.includes('você está a caminho do jogo') ||
+    cleanDesc.includes('faltam 20 minutos para o início');
+  if (is20MinAlert) {
+    return `20m:${item.matchId || cleanTitle}:${cleanDesc}`;
+  }
+  if (item.matchId && item.actionType) {
+    return `${item.actionType}:${item.matchId}`;
+  }
+  return `${item.category}:${cleanTitle}:${cleanDesc}`;
 }
 
 export const NotificationsTab: React.FC<NotificationsTabProps> = ({
@@ -28,10 +49,17 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
   onConfirmEnRouteFromNotification,
   onOpenConfirmedMatchDetails,
   onOpenCancelledMatchDetails,
+  onMarkAllRead,
+  onToggleNotificationRead,
+  onRemoteNotificationsSynced,
 }) => {
-  const [notifications, setNotifications] = useState<NotificationItem[]>(localNotifications);
+  const [remoteNotifications, setRemoteNotifications] = useState<NotificationItem[]>([]);
+  const [localReadOverrides, setLocalReadOverrides] = useState<Record<string, boolean>>({});
   const [filterCategory, setFilterCategory] = useState<string>('todas');
   const [isLoading, setIsLoading] = useState(false);
+
+  const onSyncedRef = React.useRef(onRemoteNotificationsSynced);
+  onSyncedRef.current = onRemoteNotificationsSynced;
 
   useEffect(() => {
     let active = true;
@@ -39,12 +67,9 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
     fetchNotificationsFromSupabase(userId)
       .then((rows) => {
         if (!active) return;
-        const merged = new Map<string, NotificationItem>();
-        localNotifications.forEach((n) => merged.set(n.id, n));
-        rows.forEach((r) => {
-          if (!merged.has(r.id)) merged.set(r.id, r);
-        });
-        setNotifications(Array.from(merged.values()));
+        const capped = rows.slice(0, MAX_RENDERED_NOTIFICATIONS);
+        setRemoteNotifications(capped);
+        onSyncedRef.current?.(capped);
       })
       .finally(() => {
         if (active) setIsLoading(false);
@@ -52,31 +77,66 @@ export const NotificationsTab: React.FC<NotificationsTabProps> = ({
     return () => {
       active = false;
     };
-  }, [userId, localNotifications]);
+  }, [userId]);
+
+  const notifications = useMemo(() => {
+    const byId = new Map<string, NotificationItem>();
+    const bySemantic = new Set<string>();
+
+    const addUnique = (raw: NotificationItem) => {
+      if (byId.has(raw.id)) return;
+      const semKey = getNotificationSemanticKey(raw);
+      if (bySemantic.has(semKey)) return;
+      bySemantic.add(semKey);
+      const override = localReadOverrides[raw.id];
+      byId.set(raw.id, override !== undefined ? { ...raw, read: override } : raw);
+    };
+
+    localNotifications.forEach(addUnique);
+    remoteNotifications.forEach(addUnique);
+
+    return Array.from(byId.values()).slice(0, MAX_RENDERED_NOTIFICATIONS);
+  }, [localNotifications, remoteNotifications, localReadOverrides]);
 
   const handleMarkAllRead = () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    const overrides: Record<string, boolean> = {};
+    notifications.forEach((n) => {
+      overrides[n.id] = true;
+    });
+    setLocalReadOverrides((prev) => ({ ...prev, ...overrides }));
+    setRemoteNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    onMarkAllRead?.();
+
     if (isSupabaseConfigured && userId && userId !== 'usr-guest') {
       supabase
         .from('notifications')
         .update({ read: true })
         .eq('user_id', userId)
+        .eq('read', false)
         .then(({ error }) => {
           if (error) console.warn('[Notifications mark read]', error.message);
         });
     }
   };
 
-  const handleToggleRead = (id: string) => {
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: !n.read } : n))
+  const handleToggleRead = (id: string, forceRead?: boolean) => {
+    const target = notifications.find((n) => n.id === id);
+    const nextRead = forceRead !== undefined ? forceRead : !(target?.read ?? false);
+    setLocalReadOverrides((prev) => ({ ...prev, [id]: nextRead }));
+    setRemoteNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, read: nextRead } : n))
     );
+    onToggleNotificationRead?.(id);
   };
 
-  const filtered = notifications.filter((n) => {
-    if (filterCategory === 'todas') return true;
-    return n.category === filterCategory;
-  });
+  const filtered = useMemo(
+    () =>
+      notifications.filter((n) => {
+        if (filterCategory === 'todas') return true;
+        return n.category === filterCategory;
+      }),
+    [notifications, filterCategory]
+  );
 
   const getIcon = (category: string) => {
     switch (category) {

@@ -884,8 +884,19 @@ export function subscribeToRealtimeBookingsAndNotifications(callbacks: {
     (payload) => {
       console.log('[Supabase Realtime Matches]', payload);
       const newRec = payload.new as Record<string, any> | undefined;
+      const oldRec = payload.old as Record<string, any> | undefined;
       callbacks.onMatchChange(newRec, payload.eventType);
-      if (newRec && (newRec.status === 'confirmed' || newRec.status === 'in_progress')) {
+
+      const isConfirmedStatus =
+        newRec?.status === 'confirmed' ||
+        newRec?.status === 'custody_confirmed' ||
+        newRec?.status === 'in_progress';
+      const becameConfirmedNow =
+        payload.eventType === 'INSERT' ||
+        (oldRec?.status === 'searching' && isConfirmedStatus) ||
+        (Boolean(newRec?.sos_triggered) && !Boolean(oldRec?.sos_triggered));
+
+      if (newRec && isConfirmedStatus && becameConfirmedNow) {
         callbacks.onGoalkeeperCallAlert(newRec);
         playWhistleNotification();
       }
@@ -2793,6 +2804,28 @@ export async function fetchNotificationsFromSupabase(userId?: string): Promise<N
     };
   };
 
+  const MAX_UNIQUE_NOTIFICATIONS = 40;
+  const dedupedBySemanticKey = new Map<string, NotificationItem>();
+
+  const registerNotification = (item: NotificationItem) => {
+    const cleanTitle = item.title.trim().toLowerCase();
+    const cleanDesc = item.description.trim().toLowerCase();
+    const is20MinAlert =
+      item.id.startsWith('notif-20m-') ||
+      cleanTitle.includes('você está a caminho do jogo') ||
+      cleanDesc.includes('faltam 20 minutos para o início');
+    const semanticKey = is20MinAlert
+      ? `20m:${item.matchId || cleanTitle}:${cleanDesc}`
+      : item.matchId && item.actionType
+      ? `${item.actionType}:${item.matchId}`
+      : `${item.category}:${cleanTitle}:${cleanDesc}`;
+
+    if (!mergedMap.has(item.id) && !dedupedBySemanticKey.has(semanticKey)) {
+      mergedMap.set(item.id, item);
+      dedupedBySemanticKey.set(semanticKey, item);
+    }
+  };
+
   if (userId && userId !== 'usr-guest') {
     try {
       const res = await fetch(`/api/notificacoes?userId=${encodeURIComponent(userId)}`);
@@ -2802,8 +2835,7 @@ export async function fetchNotificationsFromSupabase(userId?: string): Promise<N
       }>(res, 'Notificações Servidor');
       if (parsed.valid && parsed.data?.success && Array.isArray(parsed.data.notifications)) {
         parsed.data.notifications.forEach((row) => {
-          const item = mapRawNotification(row);
-          mergedMap.set(item.id, item);
+          registerNotification(mapRawNotification(row));
         });
       }
     } catch {
@@ -2812,7 +2844,7 @@ export async function fetchNotificationsFromSupabase(userId?: string): Promise<N
   }
 
   if (!isSupabaseConfigured) {
-    return Array.from(mergedMap.values());
+    return Array.from(mergedMap.values()).slice(0, MAX_UNIQUE_NOTIFICATIONS);
   }
 
   try {
@@ -2820,7 +2852,7 @@ export async function fetchNotificationsFromSupabase(userId?: string): Promise<N
       .from('notifications')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(30);
+      .limit(40);
 
     if (userId && userId !== 'usr-guest') {
       query = query.eq('user_id', userId);
@@ -2829,17 +2861,14 @@ export async function fetchNotificationsFromSupabase(userId?: string): Promise<N
     const { data, error } = await query;
     if (!error && Array.isArray(data)) {
       data.forEach((row: any) => {
-        const item = mapRawNotification(row);
-        if (!mergedMap.has(item.id)) {
-          mergedMap.set(item.id, item);
-        }
+        registerNotification(mapRawNotification(row));
       });
     }
   } catch (err) {
     console.warn('[fetchNotificationsFromSupabase warning]', err);
   }
 
-  return Array.from(mergedMap.values());
+  return Array.from(mergedMap.values()).slice(0, MAX_UNIQUE_NOTIFICATIONS);
 }
 
 // ==========================================
@@ -3775,8 +3804,12 @@ export async function trigger20MinEnRouteNotificationInSupabase(params: {
   const updatedMatch: MatchBooking = {
     ...params.match,
     enRoute20mNotified: true,
-    enRoute20mNotifiedAt: nowIso,
+    enRoute20mNotifiedAt: params.match.enRoute20mNotifiedAt || nowIso,
   };
+
+  if (params.match.enRoute20mNotified) {
+    return { synced: true, updatedMatch };
+  }
 
   let synced = false;
   try {
@@ -3791,17 +3824,21 @@ export async function trigger20MinEnRouteNotificationInSupabase(params: {
 
     const targetGkId = params.goalkeeperUserId || params.match.goalkeeperId;
     if (isSupabaseConfigured && targetGkId && targetGkId !== 'usr-guest') {
-      const { error } = await supabase.from('notifications').insert([
-        {
-          id: `notif-20m-${Date.now()}`,
-          user_id: targetGkId,
-          category: 'match',
-          title: `⏰ Você está a caminho do jogo em ${params.match.arenaName}?`,
-          description: `Faltam 20 minutos para o início (${params.match.time}). Toque em SIM para atualizar o painel do contratante para "A Caminho".`,
-          read: false,
-          created_at: nowIso,
-        },
-      ]);
+      const deterministicId = `notif-20m-${params.match.id}`;
+      const { error } = await supabase.from('notifications').upsert(
+        [
+          {
+            id: deterministicId,
+            user_id: targetGkId,
+            category: 'match',
+            title: `⏰ Você está a caminho do jogo em ${params.match.arenaName}?`,
+            description: `Faltam 20 minutos para o início (${params.match.time}). Toque em SIM para atualizar o painel do contratante para "A Caminho".`,
+            read: false,
+            created_at: nowIso,
+          },
+        ],
+        { onConflict: 'id' }
+      );
       synced = !error;
     }
   } catch (err) {

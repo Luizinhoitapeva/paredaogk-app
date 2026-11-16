@@ -213,14 +213,15 @@ export async function getOfflineUserProfile(): Promise<UserProfile | null> {
  * Salva a lista de partidas jogadas/agendadas para acesso offline
  */
 export async function saveOfflineMatches(matches: MatchBooking[]): Promise<void> {
+  const capped = (matches || []).slice(0, 60);
   try {
     const db = await openDatabase();
     const tx = db.transaction(STORES.MATCHES, 'readwrite');
     const store = tx.objectStore(STORES.MATCHES);
-    matches.forEach((m) => store.put(m));
+    capped.forEach((m) => store.put(m));
   } catch (err) {
     try {
-      localStorage.setItem(`${LOCAL_STORAGE_PREFIX}matches`, JSON.stringify(matches));
+      localStorage.setItem(`${LOCAL_STORAGE_PREFIX}matches`, JSON.stringify(capped));
     } catch (e) {
       console.warn('[OfflineStore Matches LocalStorage Error]', e);
     }

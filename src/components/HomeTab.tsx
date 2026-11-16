@@ -280,12 +280,17 @@ export const HomeTab: React.FC<HomeTabProps> = ({
     [filters.arenaQuery, matches]
   );
 
-  // Consulta exclusiva à tabela profiles do Supabase em tempo real
+  const matchesRef = React.useRef(matches);
+  matchesRef.current = matches;
+
+  // Consulta exclusiva à tabela profiles do Supabase em tempo real (sem re-disparos em cascata por updates operacionais de partidas)
   useEffect(() => {
     let isMounted = true;
-    setIsLoading(true);
+    if (goalkeepers.length === 0) {
+      setIsLoading(true);
+    }
 
-    queryGoalkeepersSmart(filters, matches)
+    queryGoalkeepersSmart(filters, matchesRef.current)
       .then(({ goalkeepers: results, totalRealInDb: dbTotal }) => {
         if (isMounted) {
           setGoalkeepers(results);
@@ -306,7 +311,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [filters, matches, radarRefreshTick]);
+  }, [filters, radarRefreshTick, matches.length, user.id, user.role]);
 
   const handleFilterChange = (newFilters: Partial<SmartFilterCriteria>) => {
     setFilters((prev) => ({ ...prev, ...newFilters }));
